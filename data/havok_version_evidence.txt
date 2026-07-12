@@ -1,0 +1,10 @@
+﻿Saboteur.exe Havok build strings:
+Havok-3.0.0
+Havok-3.1.0
+Havok-4.0.0-b1
+Havok-5.0.0-b1
+Havok-5.0.0-r1
+Havok-5.1.0-r1
+Havok-6.5.0-r1
+d:\Projects\WildStar\Main\code\Havok_65\Source\Common/Base/Memory/StackTracer/I
+d:\Projects\WildStar\Main\code\Havok_65\Source\Animation/Animation/Animation/hk

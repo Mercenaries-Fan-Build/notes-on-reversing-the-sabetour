@@ -1,0 +1,18 @@
+# Build artifacts
+target/
+*.exe
+*.dll
+
+# Large regenerated artifacts (keep local; document how to regenerate)
+output/
+*.megapack
+*.pck
+*.wem
+*.wav
+*.hkx
+saboteur_all_functions_decomp.txt
+
+# Scratch
+_scratch/
+*.tmp
+.DS_Store

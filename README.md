@@ -1,0 +1,69 @@
+# Notes on Reversing *The Saboteur* (2009)
+
+Reverse-engineering notes, format specs, and tooling for **The Saboteur** — Pandemic Studios'
+final game, built on the **WildStar / Odin** engine (a sibling of the Mercenaries 2 engine on the
+shared Pebble core).
+
+This is a **standalone** knowledge base. It draws on prior Mercenaries 2 reverse-engineering where
+the engine lineage genuinely carries over, but The Saboteur is a **different game on a later engine
+revision** — see [`docs/lineage_and_divergence.md`](docs/lineage_and_divergence.md) for exactly what
+transfers and what does not. Do not assume a Mercs 2 fact holds here without checking that table.
+
+## Why this game is a good RE target
+
+- **The retail (GOG) `Saboteur.exe` is a clean, fully-unpacked binary.** No SecuROM wall: `.text`
+  entropy is flat ~6.2–6.7 across all 11.9 MB, the entry point is in normal code, and the leftover
+  `.secu` section is inert. The whole engine is directly disassemblable.
+- **2,765 RTTI class names in the clear** (`WS*` = WildStar engine, `Pbl*`/`Pcl*` = Pebble core),
+  plus **898 named Lua bindings** and **321 uncompressed Lua 5.1 scripts**. Effectively a symbol map.
+- We have a **full Ghidra decompilation: 36,935 functions** (regenerate via
+  [`tools/ghidra/DecompileSaboteur.java`](tools/ghidra/DecompileSaboteur.java); the 54 MB output is
+  gitignored — see that tool's notes).
+
+## Middleware stack (confirmed from the binary)
+
+| System | Middleware | Version |
+|---|---|---|
+| Rendering | Direct3D 9 (+D3DX9_39) | — |
+| Physics/Animation | **Havok 6.5.0** (`Havok_65`) | ⚠️ NOT the 5.5 Mercs 2 uses |
+| Audio | **Wwise** (custom `1KCP` package) | 2009-era |
+| UI | Scaleform **GFx** | — |
+| Facial | FaceFX | — |
+| Video | Bink | — |
+| Core lib | Pebble (`Pbl*`/`Pcl*`) | Pandemic lineage |
+
+## Repository map
+
+```
+docs/
+  lineage_and_divergence.md   ★ shared-vs-different vs Mercenaries 2 — READ FIRST
+  binary_recon.md             the clean-exe recon (sections, RTTI, bindings, scripts)
+  community_tooling.md        community tool landscape + where we can contribute
+  formats/
+    archive_and_models.md     MP00 megapack → SBLA → MSHA → flat MESH; patch-megapack override
+    audio_1kcp.md             the 1KCP Wwise package + extraction pipeline
+    animation_havok65.md      AP0L pack, Havok 6.5, the community anim-decode gap
+tools/
+  saboteur_audio/             Rust: 1KCP → .wem carve → vgmstream → WAV (all VO extracted)
+  ghidra/DecompileSaboteur.java   headless full-binary decompile export
+data/
+  rtti_classes_all.txt (2765) · ws_engine_classes.txt (823) · lua_bindings.txt (898)
+  havok_version_evidence.txt
+memory/                       durable session notes (MEMORY.md is the index)
+```
+
+## Status
+
+| Area | State |
+|---|---|
+| Binary recon | ✅ done (clean exe, symbols recovered) |
+| Full decomp | ✅ 36,935 functions (local, regenerable) |
+| Audio / VO | ✅ extraction pipeline built; 80,872 WAV lines extracted (all 4 langs) |
+| Archive/model format | 📓 documented (from decomp + SaboteurToolset cross-ref); no reader written yet |
+| Animation decode (Havok 6.5) | ❌ open — the flagship gap (community-wide) |
+
+## Provenance / assets
+
+This repo contains **notes and tooling only**, no game assets. It assumes a local retail install
+(paths reference `C:\GOG Games\The Saboteur`). Large regenerated outputs (the decomp text, extracted
+audio, carved assets) are gitignored; each doc says how to regenerate them from your own copy.
