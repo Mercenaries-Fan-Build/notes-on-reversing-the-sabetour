@@ -128,8 +128,12 @@ pub fn export_glb(anim: &SplineAnim, blob: &[u8], names: Option<&[String]>) -> V
     finish(&mut b, &all_nodes, &samplers, &channels, None)
 }
 
-/// RIGGED export: nodes nested per `skel`; animation channel i -> bone i.
-pub fn export_glb_rigged(anim: &SplineAnim, blob: &[u8], skel: &[Bone]) -> Vec<u8> {
+/// RIGGED export: nodes nested per `skel`; animation bound track -> bone.
+///
+/// `track_to_bone`: for each animation track, the skeleton bone index it drives
+/// (`< 0` = unbound, skipped). Empty = positional fallback (track i -> bone i).
+/// This is the AP0L `ANIM` bone list (biped clips store per-track bone indices).
+pub fn export_glb_rigged(anim: &SplineAnim, blob: &[u8], skel: &[Bone], track_to_bone: &[i32]) -> Vec<u8> {
     let frames = anim.sample(blob);
     let n = frames.len().max(1);
     let nt = anim.num_transform_tracks;
@@ -152,12 +156,9 @@ pub fn export_glb_rigged(anim: &SplineAnim, blob: &[u8], skel: &[Bone]) -> Vec<u
         }
     }
 
-    // one node per bone; channel i binds to bone i (track-order == bone-order)
+    // one node per bone (nested at bind pose)
     let mut nodes = Vec::with_capacity(nb);
     for (i, bone) in skel.iter().enumerate() {
-        if i < nt {
-            emit_track_anim(&mut b, &frames, i, n, times_acc, i, &mut samplers, &mut channels);
-        }
         let ch = if kids[i].is_empty() {
             None
         } else {
@@ -165,6 +166,22 @@ pub fn export_glb_rigged(anim: &SplineAnim, blob: &[u8], skel: &[Bone]) -> Vec<u
         };
         nodes.push(node_json(&bone.name, bone.t, bone.r, bone.s, ch));
     }
+
+    // bind each track to its skeleton bone node
+    for t in 0..nt {
+        let node = if track_to_bone.is_empty() {
+            t as i32 // positional fallback
+        } else if t < track_to_bone.len() {
+            track_to_bone[t]
+        } else {
+            -1
+        };
+        if node < 0 || (node as usize) >= nb {
+            continue; // unbound track (0xFFFFFFFF) or out of range
+        }
+        emit_track_anim(&mut b, &frames, t, n, times_acc, node as usize, &mut samplers, &mut channels);
+    }
+
     let all_nodes = nodes.join(",");
     let scene_roots = roots.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
     finish(&mut b, &all_nodes, &samplers, &channels, Some(&scene_roots))

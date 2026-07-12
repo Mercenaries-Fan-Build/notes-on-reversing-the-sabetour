@@ -604,8 +604,10 @@ fn main() {
         return;
     }
 
-    // Rigged export: `sab_havok65 <pack> gltf-rigged <index> <skel> <out.glb>`
-    // Nests the clip onto a skeleton (parent tree + bind pose); channel i -> bone i.
+    // Rigged export: `sab_havok65 <pack> gltf-rigged <index> <skel> <out.glb> [trackmap]`
+    // Nests the clip onto a skeleton (parent tree + bind pose). With a `trackmap`
+    // (whitespace list of skeleton bone indices per track, -1 = unbound — the AP0L
+    // ANIM bone list) each track drives its real bone; without it, positional.
     if args.get(2).map(|s| s == "gltf-rigged").unwrap_or(false) {
         let idx: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
         let skel_path = args.get(4).map(|s| s.as_str()).unwrap_or("skeleton.skel");
@@ -616,18 +618,26 @@ fn main() {
         }
         let skel_text = fs::read_to_string(skel_path).expect("read .skel");
         let skel = gltf::read_skel(&skel_text);
+        let track_to_bone: Vec<i32> = match args.get(6) {
+            Some(p) => fs::read_to_string(p)
+                .expect("read trackmap")
+                .split_whitespace()
+                .map(|t| t.parse::<i32>().unwrap_or(-1))
+                .collect(),
+            None => Vec::new(),
+        };
         let anim = read_spline_anim(&pk, scas[idx]);
-        if anim.num_transform_tracks != skel.len() {
-            eprintln!(
-                "note: clip has {} tracks but skeleton has {} bones — binding the first {} by index",
-                anim.num_transform_tracks, skel.len(), anim.num_transform_tracks.min(skel.len())
-            );
-        }
-        let glb = gltf::export_glb_rigged(&anim, blob, &skel);
+        let bound = if track_to_bone.is_empty() {
+            anim.num_transform_tracks.min(skel.len())
+        } else {
+            track_to_bone.iter().filter(|&&b| b >= 0 && (b as usize) < skel.len()).count()
+        };
+        let glb = gltf::export_glb_rigged(&anim, blob, &skel, &track_to_bone);
         fs::write(out, &glb).expect("write glb");
         println!(
-            "wrote {out}: clip #{idx} ({} tracks) rigged onto {} bones",
-            anim.num_transform_tracks, skel.len()
+            "wrote {out}: clip #{idx} ({} tracks) -> {} bones, {bound} bound{}",
+            anim.num_transform_tracks, skel.len(),
+            if track_to_bone.is_empty() { " (positional)" } else { " (ANIM trackmap)" }
         );
         return;
     }
