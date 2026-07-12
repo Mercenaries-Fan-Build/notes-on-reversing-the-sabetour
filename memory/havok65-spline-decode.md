@@ -60,6 +60,11 @@ fixed in docs/symbol_map/animation.md.
 sequential-parse fallback (shipping sampler indexes transformOffsets@0x58; empty here) are INFERRED —
 close via out-of-corpus assets or a live x32dbg capture of `FUN_00eb7e00`.
 
-**Next:** previewer/modifier = reuse `mercs2_anim::pose/ik` + `mercs2_engine` wgpu + `mercs2_workshop` egui
-(see wad_simulator crate reuse map), pairing sab_havok65 output with AP0L bone lists + MSHA skeleton.
-See [[symbol-map-methodology]], [[animation-100pct-spline]].
+**Previewer = glTF export (DONE).** `sab_havok65 … gltf <index> out.glb` emits a self-contained binary
+glTF; Havok=glTF handedness (RH +Y-up, quat xyzw) so no coord conversion. Validated: container+JSON well-
+formed, rotation channels round-trip unit-norm. **v1 is skeleton-less/flat** — the anim pack has NO
+skeleton (hkaSkeleton/hkaAnimationBinding = 0). **Phase 2 blocker = the MSHA/MESH skeleton reader**
+(parent indices + bind pose + bone name-hashes from Dynamic0.megapack, reusing byte-identical sges) to
+match AP0L ANIM track hashes and build a nested/skinned rig; it also unlocks mesh extraction generally.
+Live wgpu previewer later via wad_simulator reuse (`mercs2_anim::pose/ik` + `mercs2_engine` + `mercs2_workshop`).
+See [[symbol-map-methodology]], [[animation-100pct-spline]], [[archive-and-patch-megapack]].

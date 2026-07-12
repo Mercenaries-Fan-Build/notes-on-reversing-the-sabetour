@@ -123,8 +123,18 @@ value      = deBoor(u = blockTime, degree, knots, controlPoints)  # CONTINUOUS s
   path — structurally present, decoders identified by table+size, but not exercised by this pack. Close via
   out-of-corpus assets or a live x32dbg capture of `FUN_00eb7e00`. See memory `havok65-spline-decode`.
 
-## Next: previewer/modifier
-The decode was the blocker. A previewer is mostly reuse from the Mercs 2 `wad_simulator` workspace:
-`mercs2_anim::pose`/`ik` (version-agnostic `hkQsTransform` compose/blend/skin) + the `mercs2_engine`
-wgpu renderer + the `mercs2_workshop` egui shell. Pair `sab_havok65` output with the AP0L `ANIM` bone
-lists and the MSHA skeleton, apply the sampling formula above, feed the skinning path.
+## Previewing: glTF export (done) + the skeleton gap
+`sab_havok65` exports any clip to a self-contained binary **glTF** (`.glb`):
+`sab_havok65 "…/Animations.pack" gltf <index> out.glb`. No coordinate conversion — Havok and glTF are
+both RH, +Y-up, metres, quaternion `(x,y,z,w)`, so the decoded transforms export verbatim.
+
+**v1 is skeleton-less** (flat nodes): the animation pack has **no skeleton** — `hkaSkeleton` /
+`hkaAnimationBinding` counts in `Animations.pack` are 0. Each track exports as its own node driven by
+its local TRS, which proves the decode but is not anatomically composed. A **proper nested, skinned rig**
+needs the character **MESH** skeleton (`MSHA`/`MESH` in `Dynamic0.megapack`): parent indices, bind pose,
+and bone name-hashes to match the AP0L `ANIM` track hashes. That skeleton/mesh reader (reusing the
+byte-identical `sges`) is the phase-2 prerequisite — it also unlocks mesh extraction generally. Once it
+exists, the same per-track TRS channels re-parent onto the real hierarchy with no decode change.
+
+A live wgpu previewer/modifier remains an option later via `wad_simulator` reuse (`mercs2_anim::pose`/`ik`
++ `mercs2_engine` renderer + `mercs2_workshop` egui shell), but glTF export covers viewing/sharing now.

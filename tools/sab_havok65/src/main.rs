@@ -34,6 +34,8 @@
 use std::env;
 use std::fs;
 
+mod gltf;
+
 // ---------- little-endian helpers ----------
 fn u16le(b: &[u8], o: usize) -> u16 { u16::from_le_bytes([b[o], b[o + 1]]) }
 fn u32le(b: &[u8], o: usize) -> u32 { u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) }
@@ -567,6 +569,24 @@ fn main() {
 
     if args.get(2).map(|s| s == "all").unwrap_or(false) {
         bulk_validate(&pk, blob, &scas);
+        return;
+    }
+
+    // Export one clip to binary glTF: `sab_havok65 <pack> gltf <index> <out.glb>`
+    if args.get(2).map(|s| s == "gltf" || s == "glb").unwrap_or(false) {
+        let idx: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let out = args.get(4).map(|s| s.as_str()).unwrap_or("clip.glb");
+        if idx >= scas.len() {
+            eprintln!("clip index {idx} out of range (have {})", scas.len());
+            return;
+        }
+        let anim = read_spline_anim(&pk, scas[idx]);
+        let glb = gltf::export_glb(&anim, blob, None);
+        fs::write(out, &glb).expect("write glb");
+        println!(
+            "wrote {out} ({} bytes): clip #{idx}, {} tracks, {} frames, {:.3}s",
+            glb.len(), anim.num_transform_tracks, anim.num_frames.max(1), anim.duration
+        );
         return;
     }
 
