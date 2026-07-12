@@ -12,6 +12,10 @@ One line per durable note. Detail lives in the note file and in `docs/`. Keep li
 - [audio-1kcp-wwise](audio-1kcp-wwise.md) — Wwise 1KCP .pck; tools/saboteur_audio extracted all 80,872 VO WAV. GOTCHA: vgmstream batch ≤200. docs/formats/audio_1kcp.md.
 - [animation-havok65-gap](animation-havok65-gap.md) — ★Havok 6.5 (NOT 5.5); AP0L pack; community can't decode hkx → our flagship target. docs/formats/animation_havok65.md.
 
+## Symbol map
+- [decomp-assertion-strings](decomp-assertion-strings.md) — ★backbone: decomp keeps EA-LA build __FILE__/__FUNCTION__ strings pinning FUN_ VAs to Class::Method. Hard ceiling: 199 methods / 98 .cpp files; beyond that = inferred. docs/symbol_map/.
+- [symbol-map results](../docs/symbol_map/README.md) — 15 subsystems documented+verified; 286 fns pinned, 264 confirmed-exist. Vehicle&Train verify was re-run after a workflow error.
+
 ## Program
 - [symbol-map-methodology](symbol-map-methodology.md) — ★USER'S GOAL + proven Mercs2 workflow: categorize decomp → parallel agents document → gap/seam passes. Rich anchors (RTTI vtables, 898 bindings, 116k-line Lua corpus, in-file call graph). Scope fan-out with user first.
 - [community-contribution-plan](community-contribution-plan.md) — where our RE amplifies SaboteurToolset/SabTool (extract-only): anim decode, audio (have it), symbol map, repack. docs/community_tooling.md.
