@@ -67,3 +67,8 @@ memory/                       durable session notes (MEMORY.md is the index)
 This repo contains **notes and tooling only**, no game assets. It assumes a local retail install
 (paths reference `C:\GOG Games\The Saboteur`). Large regenerated outputs (the decomp text, extracted
 audio, carved assets) are gitignored; each doc says how to regenerate them from your own copy.
+
+## License
+
+[MIT](LICENSE). Covers the notes and tooling in this repo only — not any game assets, which remain
+the property of their respective rights holders.
