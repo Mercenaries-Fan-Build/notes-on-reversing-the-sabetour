@@ -550,6 +550,19 @@ fn bulk_validate(pk: &Packfile, blob: &[u8], scas: &[usize]) {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    // Skeleton-only export needs no animation pack: `sab_havok65 skeleton <skel> <out.glb>`
+    if args.get(1).map(|s| s == "skeleton").unwrap_or(false) {
+        let skel_path = args.get(2).map(|s| s.as_str()).unwrap_or("skeleton.skel");
+        let out = args.get(3).map(|s| s.as_str()).unwrap_or("skeleton.glb");
+        let skel_text = fs::read_to_string(skel_path).expect("read .skel");
+        let skel = gltf::read_skel(&skel_text);
+        let glb = gltf::export_skeleton_glb(&skel);
+        fs::write(out, &glb).expect("write glb");
+        println!("wrote {out}: {} bones (bind pose, no animation)", skel.len());
+        return;
+    }
+
     let pack_path = args.get(1).map(|s| s.as_str())
         .unwrap_or("C:/GOG Games/The Saboteur/Animations.pack");
     let want = args.get(2).and_then(|s| s.parse::<usize>().ok());

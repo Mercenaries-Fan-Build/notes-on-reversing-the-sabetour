@@ -35,7 +35,14 @@ sab_havok65 "…\Animations.pack" gltf-all <outdir>
 
 # RIGGED export: nest the clip onto a real skeleton (posed character)
 sab_havok65 "…\Animations.pack" gltf-rigged <index> skeleton.skel out.glb
+
+# SKELETON-only export: just the bind-pose rig (no clip; no pack needed)
+sab_havok65 skeleton skeleton.skel out.glb
 ```
+
+Get a real `.skel` from a character mesh with the sibling `sab_skeleton` tool
+(`sab_skeleton Dynamic0.megapack CH_AL_SeanDevlin sean.json`), then convert its
+JSON to `.skel` (one line per bone: `parent name  tx ty tz  rx ry rz rw  sx sy sz`).
 
 ### The `.skel` format (for `gltf-rigged`)
 Whitespace, one bone per line, in track order (`#` comments allowed):
