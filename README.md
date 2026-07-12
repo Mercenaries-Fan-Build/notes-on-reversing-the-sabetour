@@ -40,6 +40,7 @@ docs/
   binary_recon.md             the clean-exe recon (sections, RTTI, bindings, scripts)
   community_tooling.md        community tool landscape + where we can contribute
   formats/
+    lua_scripts.md            ★ .luap packs — flat, uncompressed, the cheapest way in
     archive_and_models.md     MP00 megapack → SBLA → MSHA → flat MESH; patch-megapack override
     audio_1kcp.md             the 1KCP Wwise package + extraction pipeline
     animation_havok65.md      AP0L pack, Havok 6.5, the community anim-decode gap
@@ -59,6 +60,7 @@ memory/                       durable session notes (MEMORY.md is the index)
 | Binary recon | ✅ done (clean exe, symbols recovered) |
 | Full decomp | ✅ 36,935 functions (local, regenerable) |
 | Audio / VO | ✅ extraction pipeline built; 80,872 WAV lines extracted (all 4 langs) |
+| Lua scripts | ✅ `.luap` format cracked from decomp + verified vs retail; all 321 scripts decompiled (116,681 lines) |
 | Archive/model format | 📓 documented (from decomp + SaboteurToolset cross-ref); no reader written yet |
 | Animation decode (Havok 6.5) | ❌ open — the flagship gap (community-wide) |
 

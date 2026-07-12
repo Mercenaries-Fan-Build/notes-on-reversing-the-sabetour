@@ -1,0 +1,11 @@
+cMission_Gather = 1
+cMission_Assassinate = 2
+cMission_SearchDestroy = 3
+cMission_Total = 3
+cTime_Event_Duration = 45
+cTime_Wait_For_Player = 60
+cTime_Event_TimeOut = 60
+cEvent_Frequency_Gather = 100
+cEvent_Frequency_Assass = 0
+cEvent_Frequency_SAndD = 0
+cEvent_Frequency_Others = 0

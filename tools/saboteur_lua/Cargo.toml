@@ -1,0 +1,13 @@
+[package]
+name = "saboteur_lua"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "saboteur_lua"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 2

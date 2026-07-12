@@ -11,7 +11,7 @@ re-verified against the Saboteur binary/assets before you rely on it.
 
 | Thing | Evidence |
 |---|---|
-| **Hash algorithm** `pandemic_hash` (FNV-1a + `\|0x20` case-fold + `^0x2A`, `*prime` finalize) | Saboteur `hashstorage.hpp` `GetHash("ANY")==0xED057225`; matches ours byte-for-byte |
+| **Hash algorithm** `pandemic_hash` (FNV-1a + `\|0x20` case-fold + `^0x2A`, `*prime` finalize) | ✅ **CONFIRMED against the binary**: `FUN_00dc1e20` @ `0x00dc1e20`. `hash("ANY")==0xED057225` reproduced; also reproduces `.luap` descriptor hashes 321/321. ⚠️ finalizer is `(h ^ 0x2A) * PRIME` — XOR **then** multiply; the reverse silently yields garbage. See [`formats/lua_scripts.md`](formats/lua_scripts.md) |
 | **`sges` compression** (SEGS header, 8-byte chunk descriptors, raw deflate `-MAX_WBITS`, 64 KB sentinel) | Saboteur `compressed.hpp` == our `sges` decompressor |
 | **Lua bytecode = LuaQ 5.1** | `LuaScripts.luap` entries start `1B 4C 75 61 51`; same ChunkSpy/unluac path |
 | **f16 vertex positions** | MESH streams use half-float positions |
