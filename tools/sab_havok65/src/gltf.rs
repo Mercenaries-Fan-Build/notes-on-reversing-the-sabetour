@@ -442,6 +442,32 @@ pub fn export_preview(anim: &SplineAnim, blob: &[u8], skel: &[Bone], track_to_bo
     pack_glb(json.as_bytes(), &b.bin)
 }
 
+/// Plain static mesh (no skeleton/skin/animation) — a diagnostic to confirm the
+/// geometry itself is correct, independent of rigging.
+pub fn export_mesh_only(mesh: &Smsh) -> Vec<u8> {
+    let mut b = GlbBuilder::new();
+    let mut pmin = [f32::MAX; 3]; let mut pmax = [f32::MIN; 3];
+    for p in &mesh.positions { for k in 0..3 { pmin[k] = pmin[k].min(p[k]); pmax[k] = pmax[k].max(p[k]); } }
+    let (po, pl) = b.region(mesh.positions.iter().flat_map(|p| p.iter().copied()));
+    let pos = b.accessor(po, pl, mesh.positions.len(), "VEC3",
+        Some((format!("[{:.6},{:.6},{:.6}]", pmin[0], pmin[1], pmin[2]),
+              format!("[{:.6},{:.6},{:.6}]", pmax[0], pmax[1], pmax[2]))));
+    let nrm = b.vecn(mesh.normals.iter().flat_map(|p| p.iter().copied()), mesh.normals.len(), "VEC3");
+    let uv = b.vecn(mesh.uvs.iter().flat_map(|p| p.iter().copied()), mesh.uvs.len(), "VEC2");
+    let idx = b.indices_u32(&mesh.indices);
+    let json = format!(
+        concat!(
+            r#"{{"asset":{{"version":"2.0","generator":"sab_havok65"}},"#,
+            r#""scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"name":"mesh","mesh":0}}],"#,
+            r#""meshes":[{{"primitives":[{{"attributes":{{"POSITION":{pos},"NORMAL":{nrm},"TEXCOORD_0":{uv}}},"indices":{idx}}}]}}],"#,
+            r#""buffers":[{{"byteLength":{binlen}}}],"bufferViews":[{bvs}],"accessors":[{accs}]}}"#
+        ),
+        pos = pos, nrm = nrm, uv = uv, idx = idx,
+        binlen = b.bin.len(), bvs = b.buffer_views.join(","), accs = b.accessors.join(","),
+    );
+    pack_glb(json.as_bytes(), &b.bin)
+}
+
 /// Read a whitespace `.skel` file: one bone per line
 /// `parent name tx ty tz rx ry rz rw sx sy sz` (name may not contain spaces).
 pub fn read_skel(text: &str) -> Vec<Bone> {

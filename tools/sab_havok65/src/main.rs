@@ -551,6 +551,17 @@ fn bulk_validate(pk: &Packfile, blob: &[u8], scas: &[usize]) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    // Plain static mesh (diagnostic; no pack): `sab_havok65 mesh <smsh> <out.glb>`
+    if args.get(1).map(|s| s == "mesh").unwrap_or(false) {
+        let smsh_path = args.get(2).map(|s| s.as_str()).unwrap_or("mesh.smsh");
+        let out = args.get(3).map(|s| s.as_str()).unwrap_or("mesh.glb");
+        let mesh = gltf::read_smsh(&fs::read(smsh_path).expect("read .smsh")).expect("parse SMSH");
+        let glb = gltf::export_mesh_only(&mesh);
+        fs::write(out, &glb).expect("write glb");
+        println!("wrote {out}: plain mesh, {} verts, {} tris", mesh.positions.len(), mesh.indices.len() / 3);
+        return;
+    }
+
     // Skeleton-only export needs no animation pack: `sab_havok65 skeleton <skel> <out.glb>`
     if args.get(1).map(|s| s == "skeleton").unwrap_or(false) {
         let skel_path = args.get(2).map(|s| s.as_str()).unwrap_or("skeleton.skel");
@@ -603,6 +614,8 @@ fn main() {
         println!("exported {ok} clips -> {outdir}  ({:.1} MB total)", bytes as f64 / 1e6);
         return;
     }
+
+    // Plain mesh diagnostic: `sab_havok65 mesh <smsh> <out.glb>` (no pack needed — handled early).
 
     // FULL PREVIEW: skinned mesh + skeleton + animation, one glTF.
     // `sab_havok65 <pack> preview <index> <skel> <smsh> <out.glb> [trackmap]`
