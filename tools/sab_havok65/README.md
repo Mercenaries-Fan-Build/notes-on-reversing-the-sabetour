@@ -38,7 +38,15 @@ sab_havok65 "…\Animations.pack" gltf-rigged <index> skeleton.skel out.glb
 
 # SKELETON-only export: just the bind-pose rig (no clip; no pack needed)
 sab_havok65 skeleton skeleton.skel out.glb
+
+# FULL PREVIEW: skinned mesh + skeleton + animation in one glTF (a moving character)
+sab_havok65 "…\Animations.pack" preview <index> skeleton.skel mesh.smsh out.glb [trackmap]
 ```
+
+`preview` combines everything: the SMSH mesh (from `sab_mesh`), the skeleton
+`.skel` (must include inverse-bind matrices — regenerate with `json_to_skel.py`,
+which appends them), a decoded clip, and the ANIM `trackmap` (from
+`extract_trackmap.py`). Output is a self-contained skinned, animated character.
 
 Get a real `.skel` from a character mesh with the sibling `sab_skeleton` tool
 (`sab_skeleton Dynamic0.megapack CH_AL_SeanDevlin sean.json`), then convert its

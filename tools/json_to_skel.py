@@ -15,14 +15,17 @@ def main() -> int:
         print("usage: json_to_skel.py <skeleton.json> <out.skel>", file=sys.stderr)
         return 2
     j = json.load(open(sys.argv[1], encoding="utf-8"))
-    lines = ["# parent name  tx ty tz  rx ry rz rw  sx sy sz"]
+    lines = ["# parent name  tx ty tz  rx ry rz rw  sx sy sz  [invbind m0..m15 (row-major)]"]
     for b in j["bones"]:
         name = (b.get("name") or f"bone_{b['index']}_{b.get('name_hash_hex', '')}").replace(" ", "_")
         lo = b["local"]
         t, r, s = lo["t"], lo["r"], lo["s"]
+        # inverse-bind matrix (row-major) enables glTF skinning; optional.
+        ibm = (b.get("inv_bind") or {}).get("m")
+        ibm_str = (" " + " ".join(str(x) for x in ibm)) if ibm and len(ibm) == 16 else ""
         lines.append(
             f"{b['parent']} {name} "
-            f"{t[0]} {t[1]} {t[2]} {r[0]} {r[1]} {r[2]} {r[3]} {s[0]} {s[1]} {s[2]}"
+            f"{t[0]} {t[1]} {t[2]} {r[0]} {r[1]} {r[2]} {r[3]} {s[0]} {s[1]} {s[2]}{ibm_str}"
         )
     open(sys.argv[2], "w", encoding="utf-8").write("\n".join(lines) + "\n")
     print(f"wrote {sys.argv[2]}: {len(j['bones'])} bones")

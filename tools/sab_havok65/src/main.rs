@@ -604,6 +604,34 @@ fn main() {
         return;
     }
 
+    // FULL PREVIEW: skinned mesh + skeleton + animation, one glTF.
+    // `sab_havok65 <pack> preview <index> <skel> <smsh> <out.glb> [trackmap]`
+    if args.get(2).map(|s| s == "preview").unwrap_or(false) {
+        let idx: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let skel_path = args.get(4).map(|s| s.as_str()).unwrap_or("skeleton.skel");
+        let smsh_path = args.get(5).map(|s| s.as_str()).unwrap_or("mesh.smsh");
+        let out = args.get(6).map(|s| s.as_str()).unwrap_or("preview.glb");
+        if idx >= scas.len() {
+            eprintln!("clip index {idx} out of range (have {})", scas.len());
+            return;
+        }
+        let skel = gltf::read_skel(&fs::read_to_string(skel_path).expect("read .skel"));
+        let mesh = gltf::read_smsh(&fs::read(smsh_path).expect("read .smsh")).expect("parse SMSH");
+        let track_to_bone: Vec<i32> = match args.get(7) {
+            Some(p) => fs::read_to_string(p).expect("read trackmap")
+                .split_whitespace().map(|t| t.parse::<i32>().unwrap_or(-1)).collect(),
+            None => Vec::new(),
+        };
+        let anim = read_spline_anim(&pk, scas[idx]);
+        let glb = gltf::export_preview(&anim, blob, &skel, &track_to_bone, &mesh);
+        fs::write(out, &glb).expect("write glb");
+        println!(
+            "wrote {out}: clip #{idx} ({} tracks) on {} bones + skinned mesh ({} verts, {} tris)",
+            anim.num_transform_tracks, skel.len(), mesh.positions.len(), mesh.indices.len() / 3
+        );
+        return;
+    }
+
     // Rigged export: `sab_havok65 <pack> gltf-rigged <index> <skel> <out.glb> [trackmap]`
     // Nests the clip onto a skeleton (parent tree + bind pose). With a `trackmap`
     // (whitespace list of skeleton bone indices per track, -1 = unbound — the AP0L
