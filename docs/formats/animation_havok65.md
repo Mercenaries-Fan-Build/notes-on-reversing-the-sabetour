@@ -4,6 +4,16 @@ Animation is the flagship open problem: the whole community can *extract* Sabote
 can *decode* it into keyframes. This doc records the ground truth and why we're well-positioned to crack
 it — with an honest note on why our Mercs 2 decoder does **not** just drop in.
 
+> **★ UPDATE (2026-07-12) — the format is 100% spline-compressed.** A class-name scan of retail
+> `Animations.pack` (187 MB) found **`hkaSplineCompressedAnimation` × 9,709 and wavelet / delta /
+> interleaved × 0.** The entire corpus is a *single* format — Havok 6.5 **spline-compressed** — which is
+> a documented, community-understood format (HavokLib; Skyrim-era tooling), NOT the inverse-Haar wavelet
+> that Mercs 2 leaned on (and never fully cracked). The wavelet framing below is therefore **superseded**:
+> the decode target is spline only. The symbol map pins the sampler (`FUN_00eb7e00`
+> `sampleAndDecompress` and friends — see [`../symbol_map/animation.md`](../symbol_map/animation.md)),
+> and a double-blind two-investigator + validator agent effort is deriving the exact quantization. This
+> doc will be rewritten with the validated spec once that lands. See memory `animation-100pct-spline`.
+
 ## ⚠️ Version: Havok **6.5.0**, not 5.5
 
 Confirmed from the exe: `Havok-6.5.0-r1`, build path `d:\Projects\WildStar\Main\code\Havok_65\`
