@@ -472,7 +472,7 @@ struct SmshPrim { index_start: u32, index_count: u32, material: u32, flags: u32 
 
 /// Decode all streams from the .dat, resolve per-vertex bone indices to GLOBAL skeleton bones
 /// via the boneRemap palette: global = boneIds[ boneRemaps[localIndex].boneId ].
-fn decode_geometry(tail: &MeshTail, dat: &[u8]) -> Result<Geometry, String> {
+fn decode_geometry(tail: &MeshTail, dat: &[u8], remap: Option<&std::collections::HashMap<u32, u16>>) -> Result<Geometry, String> {
     let mut g = Geometry {
         positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(),
         joints: Vec::new(), weights: Vec::new(), indices: Vec::new(),
@@ -519,12 +519,20 @@ fn decode_geometry(tail: &MeshTail, dat: &[u8]) -> Result<Geometry, String> {
                         let raw = [dat[o], dat[o+1], dat[o+2], dat[o+3]];
                         for k in 0..4 {
                             let local = raw[k] as usize;
-                            // Resolve local palette index -> global skeleton bone.
+                            // Resolve local palette index -> this part's skeleton bone.
                             let global = if local < tail.remaps.len() {
                                 let bone_id = tail.remaps[local].bone_id as usize;
                                 *tail.skel.bone_ids.get(bone_id).unwrap_or(&0) as u16
                             } else { 0 };
-                            jnt[k] = global;
+                            // Optionally re-key onto a target skeleton by bone name-hash
+                            // (so parts with different local skeletons merge correctly).
+                            jnt[k] = match remap {
+                                Some(m) => {
+                                    let h = tail.skel.name_hashes.get(global as usize).copied().unwrap_or(0);
+                                    m.get(&h).copied().unwrap_or(global)
+                                }
+                                None => global,
+                            };
                         }
                     }
                     Attr::Color | Attr::Tangent => { /* not exported in v1 */ }
@@ -798,8 +806,36 @@ fn containing_entry(entries: &[Entry], off: usize) -> Option<(u32, u32, u64, u32
     None
 }
 
+/// Parse a sab_skeleton JSON into a bone-name-hash -> index map (std-only, tolerant).
+/// The `bones` array is index-ordered, so the n-th `name_hash` has index n.
+fn parse_target_skeleton(text: &str) -> std::collections::HashMap<u32, u16> {
+    let b = text.as_bytes();
+    let key = b"\"name_hash\"";
+    let mut map = std::collections::HashMap::new();
+    let mut idx: u16 = 0;
+    let mut i = 0usize;
+    while let Some(rel) = b[i..].windows(key.len()).position(|w| w == key) {
+        let mut p = i + rel + key.len();
+        while p < b.len() && !(b[p] as char).is_ascii_digit() { p += 1; }
+        let mut val: u64 = 0; let mut any = false;
+        while p < b.len() && (b[p] as char).is_ascii_digit() { val = val * 10 + (b[p] - b'0') as u64; p += 1; any = true; }
+        i = p;
+        if any { map.entry(val as u32).or_insert(idx); idx += 1; }
+    }
+    map
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    // Optional: `--remap <target_skel.json>` re-keys JOINTS_0 onto a target skeleton
+    // by bone name-hash, so a character's parts all share one skeleton for merging.
+    let remap_map = if let Some(i) = args.iter().position(|a| a == "--remap") {
+        let p = args.get(i + 1).cloned().expect("--remap needs a path");
+        let m = parse_target_skeleton(&std::fs::read_to_string(&p).unwrap_or_else(|e| { eprintln!("read {p}: {e}"); std::process::exit(1); }));
+        args.drain(i..=i + 1);
+        eprintln!("[*] remap: joints -> target skeleton ({} bones) from {p}", m.len());
+        Some(m)
+    } else { None };
     if args.len() < 3 {
         eprintln!("usage: sab_mesh <megapack> [name_substr] <out.smsh> [out.glb]");
         eprintln!("  default name_substr = \"CH_AL_SeanDevlin_01_GR\"");
@@ -843,7 +879,7 @@ fn main() {
     let (tail, end_p) = parse_mesh(&chosen.body).unwrap_or_else(|e| { eprintln!("mesh parse failed: {e}"); std::process::exit(1); });
     eprintln!("[*] tail parse cursor ended at {} of {} body bytes ({} leftover)", end_p, chosen.body.len(), chosen.body.len() as i64 - end_p as i64);
 
-    let g = decode_geometry(&tail, &chosen.dat).unwrap_or_else(|e| { eprintln!("geometry decode failed: {e}"); std::process::exit(1); });
+    let g = decode_geometry(&tail, &chosen.dat, remap_map.as_ref()).unwrap_or_else(|e| { eprintln!("geometry decode failed: {e}"); std::process::exit(1); });
 
     // ---------------- VALIDATION ----------------
     let nb = tail.skel.num_bones;
