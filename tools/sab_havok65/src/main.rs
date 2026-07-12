@@ -572,6 +572,25 @@ fn main() {
         return;
     }
 
+    // Export EVERY clip in the main blob: `sab_havok65 <pack> gltf-all <outdir>`
+    if args.get(2).map(|s| s == "gltf-all").unwrap_or(false) {
+        let outdir = args.get(3).map(|s| s.as_str()).unwrap_or("gltf_out");
+        fs::create_dir_all(outdir).expect("create outdir");
+        let mut ok = 0usize;
+        let mut bytes = 0u64;
+        for (i, &src) in scas.iter().enumerate() {
+            let anim = read_spline_anim(&pk, src);
+            let glb = gltf::export_glb(&anim, blob, None);
+            let path = format!("{outdir}/clip_{i:04}.glb");
+            fs::write(&path, &glb).expect("write glb");
+            ok += 1;
+            bytes += glb.len() as u64;
+            if i % 250 == 0 { println!("  {i}/{} ...", scas.len()); }
+        }
+        println!("exported {ok} clips -> {outdir}  ({:.1} MB total)", bytes as f64 / 1e6);
+        return;
+    }
+
     // Export one clip to binary glTF: `sab_havok65 <pack> gltf <index> <out.glb>`
     if args.get(2).map(|s| s == "gltf" || s == "glb").unwrap_or(false) {
         let idx: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);

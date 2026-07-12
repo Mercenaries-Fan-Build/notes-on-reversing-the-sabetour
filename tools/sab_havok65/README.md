@@ -28,7 +28,15 @@ sab_havok65 "…\Animations.pack" all
 
 # Export one clip to binary glTF (.glb) — open in Blender / any glTF viewer
 sab_havok65 "…\Animations.pack" gltf <index> out.glb
+
+# Export EVERY clip to a folder (clip_0000.glb … clip_2213.glb)
+sab_havok65 "…\Animations.pack" gltf-all <outdir>
+#   -> exported 2214 clips -> <outdir>  (~204 MB)
 ```
+
+`gltf-all` covers the **2214 clips in the main blob**. The pack also holds ~7,494 *streamed*
+single-clip sub-packfiles (one anim each); enumerating those is a small follow-up (the decoder already
+handles the format — only the packfile discovery differs).
 
 ## What the glTF export contains (and its v1 limit)
 
