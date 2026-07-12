@@ -8,10 +8,10 @@ decomp (regenerate via `tools/ghidra/DecompileSaboteur.java`; output is gitignor
 
 | Tool | Lang | Scope | Status |
 |---|---|---|---|
-| **PredatorCZ/SaboteurToolset** | C++ | anim/mesh/material/texture/map/lua/megapack **extract** | research + extract-only |
-| **BoBoBaSs84/SabTool** (fork of Blumster) | C# | content read/extract, some pack handling | "mostly reading and extracting currently" |
-| Saboteur Team wiki | — | docs/format notes | reference |
-| Nexus/ModDB mods | — | texture/script tweaks | consumer-level |
+| [**PredatorCZ/SaboteurToolset**](https://github.com/PredatorCZ/SaboteurToolset) | C++ | anim/mesh/material/texture/map/lua/megapack **extract** | research + extract-only |
+| [**BoBoBaSs84/SabTool**](https://github.com/BoBoBaSs84/SabTool) (fork of [Blumster/SabTool](https://github.com/Blumster/SabTool)) | C# | content read/extract, some pack handling | "mostly reading and extracting currently" |
+| [Saboteur Team wiki](https://saboteur-team.github.io/wiki/) | — | docs/format notes | reference |
+| [Nexus](https://www.nexusmods.com/games/thesaboteur) / [ModDB](https://www.moddb.com/games/the-saboteur) mods | — | texture/script tweaks | consumer-level |
 
 The whole scene is **extraction-oriented**. The comparison already established Pandemic write/repack
 tooling is the universal gap. Two capabilities are *hard-blocked* for them; several more we can strengthen.
@@ -19,7 +19,7 @@ tooling is the universal gap. Two capabilities are *hard-blocked* for them; seve
 ## What they explicitly CANNOT do (our biggest openings)
 
 ### 1. Decode Havok animations → keyframes  ★ highest value, real work
-SaboteurToolset's own docs: *"There is no way as in current version to convert extracted hkx
+[SaboteurToolset](https://github.com/PredatorCZ/SaboteurToolset)'s own docs: *"There is no way as in current version to convert extracted hkx
 files because of separated metadata."* They extract the raw HKX blob + FSM JSON from `animations.pack`
 (AP0L), but the **compressed animation is never decoded into keyframes/glTF**. Every Saboteur
 character/vehicle animation is currently un-viewable and un-editable.
@@ -41,7 +41,7 @@ What DOES transfer, and why we're still the best-positioned to crack it:
 - We have the **clean, unpacked Saboteur.exe decomp** with the actual Havok 6.5 sampling/decompress
   code readable (no SecuROM wall) — we can re-derive the 6.5 offsets directly from the binary that
   runs them, which is *easier* than how we got 5.5.
-- HKLib / PredatorCZ's HavokLib cover 6.5 packfile structure — we cross-check against those.
+- PredatorCZ's [HavokLib](https://github.com/PredatorCZ/HavokLib) covers 6.5 packfile structure — we cross-check against it.
 - Contribution shape: a `hkx6.5 → glTF animation` converter (Rust) that pairs the AP0L metadata with
   the blob and runs the 6.5 decompressors. This is the single most-wanted missing capability.
 
@@ -72,7 +72,7 @@ Pandemic string corpus. Running these against Saboteur's unnamed asset hashes (a
 `WWiseIDTable.bin`) resolves mystery names the community currently leaves as raw hashes.
 
 ### 6. Material / shader semantics
-SaboteurToolset dumps `WSAO` materials to JSON but treats shader params as opaque. Our rendering RE
+[SaboteurToolset](https://github.com/PredatorCZ/SaboteurToolset) dumps `WSAO` materials to JSON but treats shader params as opaque. Our rendering RE
 (what diffuse/spec/normal slots, emissive, and shader property blocks *mean*) can annotate those JSON
 fields with real semantics.
 
