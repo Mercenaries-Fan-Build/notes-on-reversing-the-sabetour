@@ -1,0 +1,11 @@
+[package]
+name = "sab_animmeta"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sab_animmeta"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
