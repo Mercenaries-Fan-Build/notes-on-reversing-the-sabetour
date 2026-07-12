@@ -1,0 +1,15 @@
+[package]
+name = "sab_skeleton"
+version = "0.1.0"
+edition = "2021"
+description = "Character skeleton (bone hierarchy + bind pose) extractor for The Saboteur (2009) MESH assets"
+
+[[bin]]
+name = "sab_skeleton"
+path = "src/main.rs"
+
+[dependencies]
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
