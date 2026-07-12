@@ -4,12 +4,16 @@ target/
 *.dll
 
 # Large regenerated artifacts (keep local; document how to regenerate)
-output/
+output/*
+!output/README.md
 *.megapack
 *.pck
 *.wem
 *.wav
 *.hkx
+*.glb
+*.gltf
+*.skel
 saboteur_all_functions_decomp.txt
 
 # Scratch
