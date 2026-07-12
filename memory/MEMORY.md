@@ -11,6 +11,8 @@ One line per durable note. Detail lives in the note file and in `docs/`. Keep li
 - [archive-and-patch-megapack](archive-and-patch-megapack.md) — MP00 megapack→SBLA→MSHA→flat MESH; override = built-in patchmega0/patchdynamic0/patchpalettes0.megapack (hash wins, no injection). docs/formats/archive_and_models.md.
 - [audio-1kcp-wwise](audio-1kcp-wwise.md) — Wwise 1KCP .pck; tools/saboteur_audio extracted all 80,872 VO WAV. GOTCHA: vgmstream batch ≤200. docs/formats/audio_1kcp.md.
 - [animation-havok65-gap](animation-havok65-gap.md) — ★Havok 6.5 (NOT 5.5); AP0L pack; community can't decode hkx → our flagship target. docs/formats/animation_havok65.md.
+- [animation-100pct-spline](animation-100pct-spline.md) — ★Animations.pack is 100% hkaSplineCompressedAnimation (9709×; wavelet/delta/interleaved=0). One KNOWN format, not the blocked Mercs2 wavelet.
+- [havok65-spline-decode](havok65-spline-decode.md) — ★FLAGSHIP CRACKED: double-blind 2-investigator + adjudicator decoded all clips. Authoritative decoder = tools/sab_havok65 (2214/2214 clean). THREECOMP40 + time model adjudicated from Saboteur.exe disasm.
 
 ## Symbol map
 - [decomp-assertion-strings](decomp-assertion-strings.md) — ★backbone: decomp keeps EA-LA build __FILE__/__FUNCTION__ strings pinning FUN_ VAs to Class::Method. Hard ceiling: 199 methods / 98 .cpp files; beyond that = inferred. docs/symbol_map/.

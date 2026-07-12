@@ -62,7 +62,7 @@ memory/                       durable session notes (MEMORY.md is the index)
 | Audio / VO | ✅ extraction pipeline built; 80,872 WAV lines extracted (all 4 langs) |
 | Lua scripts | ✅ `.luap` format cracked from decomp + verified vs retail; all 321 scripts decompiled (116,681 lines) |
 | Archive/model format | 📓 documented (from decomp + SaboteurToolset cross-ref); no reader written yet |
-| Animation decode (Havok 6.5) | ❌ open — the flagship gap (community-wide) |
+| Animation decode (Havok 6.5) | ✅ **cracked** — corpus is 100% `hkaSplineCompressedAnimation`; decoder in `tools/sab_havok65` decodes all 2,214 clips (0 failures). Was the flagship community-wide gap. |
 
 ## Provenance / assets
 

@@ -22,12 +22,20 @@ Scripts drive animation through `Actor.*` bindings (names from `lua_bindings.txt
 
 ## Havok 6.5 sampler edge (the decode core)
 
+> **✅ CORRECTED + FULLY DECODED (2026-07-12).** A double-blind two-investigator + adjudicator effort
+> decoded this format end-to-end (all 2,214 clips, 0 failures) and **corrected one error in the table
+> below**: the `&3` channel (`FUN_00eb7880`) is **TRANSLATION**, and the `>>2 &0xf` channel
+> (`FUN_00eb7830`) is **ROTATION** — the reverse of the "R/T/S" labelling first written here. Proven from
+> `FUN_00eb7e00` output slots (translation@0x00, rotation@0x10, scale@0x20) and from disassembling the
+> THREECOMP40 unpacker `FUN_00f22470` directly. The validated byte-level spec + a working decoder are in
+> [`../formats/animation_havok65.md`](../formats/animation_havok65.md) (`tools/sab_havok65`).
+
 The compressed-animation module lives at `0x00eb0000–0x00ebc000`. The **spline** path is fully pinned via the `hkaSplineCompressedAnimationCtor.cpp` assert anchor:
 
 | VA | Proposed name | Role |
 |----|---------------|------|
-| `FUN_00eb7e00` | `hkaSplineCompressedAnimation::sampleAndDecompress` (core) | Per-track loop: reads control byte, splits into R/T/S quant types (`&3`, `>>2 &0xf`, `>>6`), decodes each channel |
-| `FUN_00eb73a0` | spline per-component curve eval (`readNURBSCurve`) | Shared evaluator called by the R/T/S decoders `FUN_00eb7880/7930/79e0` |
+| `FUN_00eb7e00` | `hkaSplineCompressedAnimation::sampleAndDecompress` (core) | Per-track loop: reads control byte, splits into **T/R/S** quant types (`&3`=translation, `>>2 &0xf`=rotation, `>>6`=scale), decodes each channel |
+| `FUN_00eb73a0` | spline per-component curve eval (`readNURBSCurve`) | Shared evaluator called by the **translation/scale** decoders `FUN_00eb7880`/`FUN_00eb7930` (the `>>2&0xf` **rotation** decoder `FUN_00eb7830` routes through `FUN_00eb72c0` instead) |
 | `FUN_00eb8120` | block/frame resolver | Reads block header + interpolant before decompression |
 | `FUN_00eb5de0` | `hkaSplineCompressedAnimation::ctor` | Sets vtable `PTR_FUN_0109c8ac`, copies 9 header fields |
 | `FUN_00eb7740` | `hkaSplineCompressedAnimation::~dtor` | Frees the 5 block arrays (offsets `0x10/0x13/0x16/0x19/0x1c`) |
