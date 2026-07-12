@@ -1,213 +1,254 @@
 //! Minimal, dependency-free glTF 2.0 (.glb) exporter for decoded spline clips.
 //!
-//! Emits one animated node per transform track, each driven by the decoded
-//! per-frame local hkQsTransform (translation / rotation / scale) as a LINEAR
-//! animation. No coordinate conversion: Havok and glTF are both right-handed,
-//! +Y up, metres, quaternion (x,y,z,w) — so values export verbatim.
+//! No coordinate conversion: Havok and glTF are both right-handed, +Y up, metres,
+//! quaternion (x,y,z,w) — so decoded transforms export verbatim.
 //!
-//! v1 limitation (documented): the bones are emitted FLAT (all under one root),
-//! because the parent hierarchy + bind pose live in the character MESH skeleton,
-//! not the animation pack. A viewer will show every bone animating in its own
-//! local frame (a moving "joint rig"), which proves the decode. A properly
-//! NESTED, skinned rig needs the MSHA/MESH skeleton reader (phase 2) — then the
-//! same per-track TRS channels attach to the real hierarchy with no change here.
+//! Two modes:
+//!   * [`export_glb`]        — FLAT: one node per transform track under a single
+//!     root, each driven by its local TRS. Proves the decode with no skeleton.
+//!   * [`export_glb_rigged`] — NESTED: nodes parented per a supplied skeleton,
+//!     each bone's rest = its bind pose, animation channel i bound to bone i
+//!     (Saboteur clips are authored track-order == skeleton bone-order). This is
+//!     the real posed preview.
 
 use crate::SplineAnim;
 
 const F32: u32 = 5126; // GL FLOAT
-const AB: u32 = 34962; // ARRAY_BUFFER (unused target; kept for clarity)
 
-fn push_f32(buf: &mut Vec<u8>, v: f32) {
-    buf.extend_from_slice(&v.to_le_bytes());
+/// One skeleton bone (rest/bind pose, parent link). See the `.skel` reader.
+pub struct Bone {
+    pub parent: i32, // -1 for a root
+    pub name: String,
+    pub t: [f32; 3],
+    pub r: [f32; 4], // xyzw
+    pub s: [f32; 3],
 }
 
-/// Append `n`-component vectors (from `it`) to `bin`, 4-byte aligned, returning
-/// (byteOffset, byteLength).
-fn region<I: Iterator<Item = f32>>(bin: &mut Vec<u8>, it: I) -> (usize, usize) {
-    while bin.len() % 4 != 0 {
-        bin.push(0);
+/// Accumulates the .glb binary buffer + accessors/bufferViews.
+struct GlbBuilder {
+    bin: Vec<u8>,
+    accessors: Vec<String>,
+    buffer_views: Vec<String>,
+}
+impl GlbBuilder {
+    fn new() -> Self {
+        GlbBuilder { bin: Vec::new(), accessors: Vec::new(), buffer_views: Vec::new() }
     }
-    let start = bin.len();
-    for v in it {
-        push_f32(bin, v);
+    fn region<I: Iterator<Item = f32>>(&mut self, it: I) -> (usize, usize) {
+        while self.bin.len() % 4 != 0 {
+            self.bin.push(0);
+        }
+        let start = self.bin.len();
+        for v in it {
+            self.bin.extend_from_slice(&v.to_le_bytes());
+        }
+        (start, self.bin.len() - start)
     }
-    (start, bin.len() - start)
+    fn accessor(&mut self, off: usize, len: usize, count: usize, kind: &str, mm: Option<(String, String)>) -> usize {
+        let bv = self.buffer_views.len();
+        self.buffer_views
+            .push(format!(r#"{{"buffer":0,"byteOffset":{off},"byteLength":{len}}}"#));
+        let mms = match mm {
+            Some((a, b)) => format!(r#","min":{a},"max":{b}"#),
+            None => String::new(),
+        };
+        let idx = self.accessors.len();
+        self.accessors.push(format!(
+            r#"{{"bufferView":{bv},"componentType":{F32},"count":{count},"type":"{kind}"{mms}}}"#
+        ));
+        idx
+    }
+    /// A shared time (input) accessor with the required min/max.
+    fn times(&mut self, n: usize, fd: f32) -> usize {
+        let (o, l) = self.region((0..n).map(|f| f as f32 * fd));
+        let last = (n.saturating_sub(1)) as f32 * fd;
+        self.accessor(o, l, n, "SCALAR", Some((format!("[{:.6}]", 0.0), format!("[{:.6}]", last))))
+    }
+    fn vecn(&mut self, vals: impl Iterator<Item = f32>, count: usize, kind: &str) -> usize {
+        let (o, l) = self.region(vals);
+        self.accessor(o, l, count, kind, None)
+    }
 }
 
-/// Build the .glb bytes for one decoded clip. `names` optionally supplies a
-/// per-track label (e.g. a bone-hash string); otherwise nodes are `track_{i}`.
-pub fn export_glb(anim: &SplineAnim, blob: &[u8], names: Option<&[String]>) -> Vec<u8> {
-    let frames = anim.sample(blob);
-    let n_frames = frames.len().max(1);
-    let n_tracks = anim.num_transform_tracks;
-    let fd = if anim.frame_duration.is_finite() && anim.frame_duration > 0.0 {
+/// Per-track T/R/S sampler+channel emission shared by flat and rigged modes.
+/// Appends to `samplers`/`channels`; returns the 3 accessor indices unused
+/// (they are wired internally). `node_id` is the glTF node the channels target.
+fn emit_track_anim(
+    b: &mut GlbBuilder, frames: &[Vec<crate::QsTransform>], t: usize, n: usize,
+    times_acc: usize, node_id: usize, samplers: &mut Vec<String>, channels: &mut Vec<String>,
+) {
+    let a_t = b.vecn(frames.iter().flat_map(|fr| fr[t].t[..3].iter().copied()), n, "VEC3");
+    let a_r = b.vecn(frames.iter().flat_map(|fr| fr[t].r.iter().copied()), n, "VEC4");
+    let a_s = b.vecn(frames.iter().flat_map(|fr| fr[t].s[..3].iter().copied()), n, "VEC3");
+    let s0 = samplers.len();
+    for out in [a_t, a_r, a_s] {
+        samplers.push(format!(
+            r#"{{"input":{times_acc},"interpolation":"LINEAR","output":{out}}}"#
+        ));
+    }
+    for (k, path) in ["translation", "rotation", "scale"].iter().enumerate() {
+        channels.push(format!(
+            r#"{{"sampler":{},"target":{{"node":{node_id},"path":"{path}"}}}}"#,
+            s0 + k
+        ));
+    }
+}
+
+fn frame_dur(anim: &SplineAnim) -> f32 {
+    if anim.frame_duration.is_finite() && anim.frame_duration > 0.0 {
         anim.frame_duration
     } else {
         1.0 / 30.0
-    };
+    }
+}
 
-    let mut bin: Vec<u8> = Vec::new();
-    let mut accessors = String::new();
-    let mut buffer_views = String::new();
-    let mut n_acc = 0usize;
+/// FLAT export: bones under one root, no hierarchy.
+pub fn export_glb(anim: &SplineAnim, blob: &[u8], names: Option<&[String]>) -> Vec<u8> {
+    let frames = anim.sample(blob);
+    let n = frames.len().max(1);
+    let nt = anim.num_transform_tracks;
+    let fd = frame_dur(anim);
 
-    // Helper to register a bufferView + accessor, returns accessor index.
-    let add_accessor =
-        |bin_off: usize, byte_len: usize, count: usize, kind: &str, minmax: Option<(String, String)>,
-         buffer_views: &mut String, accessors: &mut String, n_acc: &mut usize| -> usize {
-            if !buffer_views.is_empty() {
-                buffer_views.push(',');
-            }
-            buffer_views.push_str(&format!(
-                r#"{{"buffer":0,"byteOffset":{bin_off},"byteLength":{byte_len}}}"#
-            ));
-            let bv = *n_acc; // one bufferView per accessor -> same index
-            if !accessors.is_empty() {
-                accessors.push(',');
-            }
-            let mm = match minmax {
-                Some((mn, mx)) => format!(r#","min":{mn},"max":{mx}"#),
-                None => String::new(),
-            };
-            accessors.push_str(&format!(
-                r#"{{"bufferView":{bv},"componentType":{F32},"count":{count},"type":"{kind}"{mm}}}"#
-            ));
-            let idx = *n_acc;
-            *n_acc += 1;
-            idx
-        };
+    let mut b = GlbBuilder::new();
+    let times_acc = b.times(n, fd);
+    let mut samplers = Vec::new();
+    let mut channels = Vec::new();
+    let mut nodes = Vec::new();
+    let mut children = Vec::new();
 
-    // Shared time (input) accessor — required min/max.
-    let (t_off, t_len) = region(&mut bin, (0..n_frames).map(|f| f as f32 * fd));
-    let last_t = (n_frames.saturating_sub(1)) as f32 * fd;
-    let times_acc = add_accessor(
-        t_off,
-        t_len,
-        n_frames,
-        "SCALAR",
-        Some((format!("[{:.6}]", 0.0), format!("[{:.6}]", last_t))),
-        &mut buffer_views,
-        &mut accessors,
-        &mut n_acc,
-    );
-
-    // Per-track T/R/S output accessors + samplers + channels + nodes.
-    let mut samplers = String::new();
-    let mut channels = String::new();
-    let mut nodes = String::new();
-    let mut child_ids = String::new();
-
-    for t in 0..n_tracks {
-        // gather this track's per-frame T (vec3), R (vec4), S (vec3)
-        let (to, tl) = region(
-            &mut bin,
-            frames.iter().flat_map(|fr| {
-                let q = &fr[t];
-                [q.t[0], q.t[1], q.t[2]].into_iter()
-            }),
-        );
-        let (ro, rl) = region(
-            &mut bin,
-            frames.iter().flat_map(|fr| {
-                let q = &fr[t];
-                [q.r[0], q.r[1], q.r[2], q.r[3]].into_iter()
-            }),
-        );
-        let (so, sl) = region(
-            &mut bin,
-            frames.iter().flat_map(|fr| {
-                let q = &fr[t];
-                [q.s[0], q.s[1], q.s[2]].into_iter()
-            }),
-        );
-        let a_t = add_accessor(to, tl, n_frames, "VEC3", None, &mut buffer_views, &mut accessors, &mut n_acc);
-        let a_r = add_accessor(ro, rl, n_frames, "VEC4", None, &mut buffer_views, &mut accessors, &mut n_acc);
-        let a_s = add_accessor(so, sl, n_frames, "VEC3", None, &mut buffer_views, &mut accessors, &mut n_acc);
-
-        let node_id = t + 1; // node 0 is the root
-        let s_base = t * 3;
-        if !samplers.is_empty() {
-            samplers.push(',');
-            channels.push(',');
-        }
-        samplers.push_str(&format!(
-            r#"{{"input":{times_acc},"interpolation":"LINEAR","output":{a_t}}},{{"input":{times_acc},"interpolation":"LINEAR","output":{a_r}}},{{"input":{times_acc},"interpolation":"LINEAR","output":{a_s}}}"#
-        ));
-        channels.push_str(&format!(
-            r#"{{"sampler":{s},"target":{{"node":{node_id},"path":"translation"}}}},{{"sampler":{sr},"target":{{"node":{node_id},"path":"rotation"}}}},{{"sampler":{ss},"target":{{"node":{node_id},"path":"scale"}}}}"#,
-            s = s_base, sr = s_base + 1, ss = s_base + 2
-        ));
-
-        // node rest transform = frame-0 local TRS (so the static pose is sensible)
+    for t in 0..nt {
+        emit_track_anim(&mut b, &frames, t, n, times_acc, t + 1, &mut samplers, &mut channels);
         let f0 = &frames[0][t];
-        let label = names
-            .and_then(|ns| ns.get(t).cloned())
-            .unwrap_or_else(|| format!("track_{t}"));
-        if !nodes.is_empty() {
-            nodes.push(',');
-            child_ids.push(',');
+        let label = names.and_then(|ns| ns.get(t).cloned()).unwrap_or_else(|| format!("track_{t}"));
+        nodes.push(node_json(&label, [f0.t[0], f0.t[1], f0.t[2]], f0.r, [f0.s[0], f0.s[1], f0.s[2]], None));
+        children.push((t + 1).to_string());
+    }
+    let root = format!(r#"{{"name":"clip","children":[{}]}}"#, children.join(","));
+    let all_nodes = std::iter::once(root).chain(nodes).collect::<Vec<_>>().join(",");
+    finish(&mut b, &all_nodes, &samplers, &channels, None)
+}
+
+/// RIGGED export: nodes nested per `skel`; animation channel i -> bone i.
+pub fn export_glb_rigged(anim: &SplineAnim, blob: &[u8], skel: &[Bone]) -> Vec<u8> {
+    let frames = anim.sample(blob);
+    let n = frames.len().max(1);
+    let nt = anim.num_transform_tracks;
+    let fd = frame_dur(anim);
+    let nb = skel.len();
+
+    let mut b = GlbBuilder::new();
+    let times_acc = b.times(n, fd);
+    let mut samplers = Vec::new();
+    let mut channels = Vec::new();
+
+    // child lists from parent links
+    let mut kids: Vec<Vec<usize>> = vec![Vec::new(); nb];
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, bone) in skel.iter().enumerate() {
+        if bone.parent >= 0 && (bone.parent as usize) < nb {
+            kids[bone.parent as usize].push(i);
+        } else {
+            roots.push(i);
         }
-        nodes.push_str(&format!(
-            r#"{{"name":"{label}","translation":[{tx:.6},{ty:.6},{tz:.6}],"rotation":[{rx:.6},{ry:.6},{rz:.6},{rw:.6}],"scale":[{sx:.6},{sy:.6},{sz:.6}]}}"#,
-            tx = f0.t[0], ty = f0.t[1], tz = f0.t[2],
-            rx = f0.r[0], ry = f0.r[1], rz = f0.r[2], rw = f0.r[3],
-            sx = f0.s[0], sy = f0.s[1], sz = f0.s[2],
-        ));
-        child_ids.push_str(&node_id.to_string());
     }
 
-    // Root node (index 0) parents every track node.
-    let root = format!(r#"{{"name":"clip","children":[{child_ids}]}}"#);
-    let all_nodes = if nodes.is_empty() {
-        root
-    } else {
-        format!("{root},{nodes}")
-    };
+    // one node per bone; channel i binds to bone i (track-order == bone-order)
+    let mut nodes = Vec::with_capacity(nb);
+    for (i, bone) in skel.iter().enumerate() {
+        if i < nt {
+            emit_track_anim(&mut b, &frames, i, n, times_acc, i, &mut samplers, &mut channels);
+        }
+        let ch = if kids[i].is_empty() {
+            None
+        } else {
+            Some(kids[i].iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","))
+        };
+        nodes.push(node_json(&bone.name, bone.t, bone.r, bone.s, ch));
+    }
+    let all_nodes = nodes.join(",");
+    let scene_roots = roots.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+    finish(&mut b, &all_nodes, &samplers, &channels, Some(&scene_roots))
+}
 
+fn node_json(name: &str, t: [f32; 3], r: [f32; 4], s: [f32; 3], children: Option<String>) -> String {
+    let ch = match children {
+        Some(c) => format!(r#","children":[{c}]"#),
+        None => String::new(),
+    };
+    let esc = name.replace('\\', "_").replace('"', "_");
+    format!(
+        r#"{{"name":"{esc}","translation":[{:.6},{:.6},{:.6}],"rotation":[{:.6},{:.6},{:.6},{:.6}],"scale":[{:.6},{:.6},{:.6}]{ch}}}"#,
+        t[0], t[1], t[2], r[0], r[1], r[2], r[3], s[0], s[1], s[2]
+    )
+}
+
+fn finish(b: &mut GlbBuilder, nodes: &str, samplers: &[String], channels: &[String], scene_nodes: Option<&str>) -> Vec<u8> {
+    let scene = scene_nodes.unwrap_or("0");
     let json = format!(
         concat!(
             r#"{{"asset":{{"version":"2.0","generator":"sab_havok65"}},"#,
-            r#""scene":0,"scenes":[{{"nodes":[0]}}],"#,
+            r#""scene":0,"scenes":[{{"nodes":[{scene}]}}],"#,
             r#""nodes":[{nodes}],"#,
             r#""animations":[{{"name":"clip","samplers":[{samplers}],"channels":[{channels}]}}],"#,
             r#""buffers":[{{"byteLength":{binlen}}}],"#,
-            r#""bufferViews":[{bvs}],"#,
-            r#""accessors":[{accs}]}}"#
+            r#""bufferViews":[{bvs}],"accessors":[{accs}]}}"#
         ),
-        nodes = all_nodes,
-        samplers = samplers,
-        channels = channels,
-        binlen = bin.len(),
-        bvs = buffer_views,
-        accs = accessors,
+        scene = scene,
+        nodes = nodes,
+        samplers = samplers.join(","),
+        channels = channels.join(","),
+        binlen = b.bin.len(),
+        bvs = b.buffer_views.join(","),
+        accs = b.accessors.join(","),
     );
-
-    let _ = AB; // silence unused-const if not referenced elsewhere
-    pack_glb(json.as_bytes(), &bin)
+    pack_glb(json.as_bytes(), &b.bin)
 }
 
 /// Assemble a binary glTF container (header + JSON chunk + BIN chunk).
 fn pack_glb(json: &[u8], bin: &[u8]) -> Vec<u8> {
-    let mut json_chunk = json.to_vec();
-    while json_chunk.len() % 4 != 0 {
-        json_chunk.push(b' ');
+    let mut jc = json.to_vec();
+    while jc.len() % 4 != 0 {
+        jc.push(b' ');
     }
-    let mut bin_chunk = bin.to_vec();
-    while bin_chunk.len() % 4 != 0 {
-        bin_chunk.push(0);
+    let mut bc = bin.to_vec();
+    while bc.len() % 4 != 0 {
+        bc.push(0);
     }
-    let total = 12 + 8 + json_chunk.len() + 8 + bin_chunk.len();
+    let total = 12 + 8 + jc.len() + 8 + bc.len();
     let mut out = Vec::with_capacity(total);
     out.extend_from_slice(&0x4654_6C67u32.to_le_bytes()); // 'glTF'
-    out.extend_from_slice(&2u32.to_le_bytes()); // version
+    out.extend_from_slice(&2u32.to_le_bytes());
     out.extend_from_slice(&(total as u32).to_le_bytes());
-    // JSON chunk
-    out.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(jc.len() as u32).to_le_bytes());
     out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // 'JSON'
-    out.extend_from_slice(&json_chunk);
-    // BIN chunk
-    out.extend_from_slice(&(bin_chunk.len() as u32).to_le_bytes());
+    out.extend_from_slice(&jc);
+    out.extend_from_slice(&(bc.len() as u32).to_le_bytes());
     out.extend_from_slice(&0x004E_4942u32.to_le_bytes()); // 'BIN\0'
-    out.extend_from_slice(&bin_chunk);
+    out.extend_from_slice(&bc);
+    out
+}
+
+/// Read a whitespace `.skel` file: one bone per line
+/// `parent name tx ty tz rx ry rz rw sx sy sz` (name may not contain spaces).
+pub fn read_skel(text: &str) -> Vec<Bone> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 12 {
+            continue;
+        }
+        let p = |i: usize| f[i].parse::<f32>().unwrap_or(0.0);
+        out.push(Bone {
+            parent: f[0].parse().unwrap_or(-1),
+            name: f[1].to_string(),
+            t: [p(2), p(3), p(4)],
+            r: [p(5), p(6), p(7), p(8)],
+            s: [p(9), p(10), p(11)],
+        });
+    }
     out
 }

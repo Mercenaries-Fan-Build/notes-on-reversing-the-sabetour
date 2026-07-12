@@ -591,6 +591,34 @@ fn main() {
         return;
     }
 
+    // Rigged export: `sab_havok65 <pack> gltf-rigged <index> <skel> <out.glb>`
+    // Nests the clip onto a skeleton (parent tree + bind pose); channel i -> bone i.
+    if args.get(2).map(|s| s == "gltf-rigged").unwrap_or(false) {
+        let idx: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let skel_path = args.get(4).map(|s| s.as_str()).unwrap_or("skeleton.skel");
+        let out = args.get(5).map(|s| s.as_str()).unwrap_or("rigged.glb");
+        if idx >= scas.len() {
+            eprintln!("clip index {idx} out of range (have {})", scas.len());
+            return;
+        }
+        let skel_text = fs::read_to_string(skel_path).expect("read .skel");
+        let skel = gltf::read_skel(&skel_text);
+        let anim = read_spline_anim(&pk, scas[idx]);
+        if anim.num_transform_tracks != skel.len() {
+            eprintln!(
+                "note: clip has {} tracks but skeleton has {} bones — binding the first {} by index",
+                anim.num_transform_tracks, skel.len(), anim.num_transform_tracks.min(skel.len())
+            );
+        }
+        let glb = gltf::export_glb_rigged(&anim, blob, &skel);
+        fs::write(out, &glb).expect("write glb");
+        println!(
+            "wrote {out}: clip #{idx} ({} tracks) rigged onto {} bones",
+            anim.num_transform_tracks, skel.len()
+        );
+        return;
+    }
+
     // Export one clip to binary glTF: `sab_havok65 <pack> gltf <index> <out.glb>`
     if args.get(2).map(|s| s == "gltf" || s == "glb").unwrap_or(false) {
         let idx: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);

@@ -32,7 +32,23 @@ sab_havok65 "…\Animations.pack" gltf <index> out.glb
 # Export EVERY clip to a folder (clip_0000.glb … clip_2213.glb)
 sab_havok65 "…\Animations.pack" gltf-all <outdir>
 #   -> exported 2214 clips -> <outdir>  (~204 MB)
+
+# RIGGED export: nest the clip onto a real skeleton (posed character)
+sab_havok65 "…\Animations.pack" gltf-rigged <index> skeleton.skel out.glb
 ```
+
+### The `.skel` format (for `gltf-rigged`)
+Whitespace, one bone per line, in track order (`#` comments allowed):
+```
+# parent name  tx ty tz  rx ry rz rw  sx sy sz
+-1 Pelvis   0 0.9 0   0 0 0 1   1 1 1
+0  Spine    0 0.1 0   0 0 0 1   1 1 1
+...
+```
+`parent` = 0-based index of the parent bone (`-1` = root); `t`/`r`(xyzw)/`s` = the bind (rest) pose
+local to the parent. Animation channel `i` binds to bone `i` (Saboteur clips are authored
+track-order == skeleton bone-order). The skeleton comes from the character MESH — see the phase-2
+note below; this format is the hand-off point.
 
 `gltf-all` covers the **2214 clips in the main blob**. The pack also holds ~7,494 *streamed*
 single-clip sub-packfiles (one anim each); enumerating those is a small follow-up (the decoder already
