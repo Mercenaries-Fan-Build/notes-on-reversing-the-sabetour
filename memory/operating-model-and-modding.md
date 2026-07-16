@@ -49,9 +49,23 @@ Our unique assets (from the clean decomp):
   u32 sub_count, sub_count×{u32 asset_hash,u16,u16}, 56B trailer(trailer[3]==sub_count)}`. Consumes
   Global.map exactly (356/356). Add an entry = append + bump record_count.
 
-**Wave 2 (next parallel streams):** (3) **DTEX** read/write for reskins; (4) **GameTemplates.wsd** (`AULB`)
-WRITE; (5) the **conduit-path→crc/index** pipeline (the one thing blocking brand-NEW assets — keys hash
-external paths absent from the pack; likely in `loosefiles_BinPC.pack`/resource DB). **Live validation
-(x32dbg, later):** drop a `patchdynamic0.megapack`, breakpoint the mount (`FUN_00e34f70`) + bsearch
-(`FUN_00e42740`) to confirm the override actually loads. **RE goldmine:** the 2008-05-20 pre-release build
-(often less stripped). See [[community-contribution-plan]].
+**Wave 2 — results:**
+- ✅ **GameTemplates.wsd (`AULB`)** → `tools/sab_gametemplates` (0872bae). Loader `FUN_0162bfa0`. `"AULB"`
+  + u32 entry_count; entries = contiguous Templates or 8-byte Markers (count as slots). Template =
+  `{u32 total_size, u32 0, u32 1, len+name, len+type(=C++ class), u32 pair_count, pairs{u32 hash, u32
+  size, data}}`. ★Pair hash = **little-endian** `pandemic_hash(property_name)` (community tool had it
+  BE — both blind investigators corrected it). Data = LE f32/i32 or a 4-byte `pandemic_hash` asset-ref.
+  Round-trips DLC (3969 B) + the full main DB (11072 entries, in `loosefiles_BinPC.pack`).
+- ✅ **★MEGAPACK KEY DERIVATION (overturns wave-1!)** → `tools/sab_megapack_key` (9bc0a6b). The index
+  entry is `{u32 path_crc; u32 name_crc; u32 size; u64 offset}` and BOTH keys ARE derivable from the
+  resource name: `path_crc = pandemic_hash("global\\"+name+".dynpack")` (`.palettepack` for Palettes0),
+  `name_crc = pandemic_hash(name)`. Confirmed 759/759 + 274/274; I self-reproduced #0 Act1_IntKey →
+  0xD3EF69E0/0xB333DA43. Resolver `FUN_009ef620` routes on the suffix. ⇒ **brand-new assets ARE
+  registerable** (not just overrides). Open: world/startup packs (Mega*/Start0) use a different path
+  string for path_crc. This is the key hash — the crc "hashes an external path" IS recoverable.
+- ⏳ **DTEX** (textures, reskins) — one investigator in (259/259 byte-identical), adjudication pending.
+
+**Still open / next:** wire name→key into `sab_pack` (compute keys, no hex); world-pack path convention;
+DTEX adjudication. **Live validation (x32dbg, later):** drop a `patchdynamic0.megapack`, breakpoint mount
+`FUN_00e34f70` + bsearch `FUN_00e42740` to confirm it loads in-engine (still INFERRED). **RE goldmine:**
+the 2008-05-20 pre-release build (often less stripped). See [[community-contribution-plan]].
