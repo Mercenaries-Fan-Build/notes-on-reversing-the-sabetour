@@ -1,0 +1,12 @@
+[package]
+name = "sab_map6"
+version = "0.1.0"
+edition = "2021"
+description = "Reader for The Saboteur (2009) MAP6 files (global.map / <region>.map)"
+
+[[bin]]
+name = "sab_map6"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
