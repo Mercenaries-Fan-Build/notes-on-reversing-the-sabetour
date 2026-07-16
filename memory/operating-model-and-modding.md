@@ -77,7 +77,21 @@ Our unique assets (from the clean decomp):
   for exact; edited textures re-inflate fine. Remaining: SBLA sub-pack writer w/ ALBS-directory fixup for
   drop-in multi-texture reskins.
 
-**Still open / next:** wire name→key into `sab_pack` (compute keys, no hex); world-pack path convention;
-DTEX adjudication. **Live validation (x32dbg, later):** drop a `patchdynamic0.megapack`, breakpoint mount
-`FUN_00e34f70` + bsearch `FUN_00e42740` to confirm it loads in-engine (still INFERRED). **RE goldmine:**
-the 2008-05-20 pre-release build (often less stripped). See [[community-contribution-plan]].
+**Wave 3 (parallel double-blind, done):**
+- ✅ **SBLA/ALBS sub-pack writer** → `tools/sab_sbla` (892e28f). ALBS header + N×24-byte self-delimiting
+  directory {hash,offset,compSize,uncSize,0,flag}; N from offset-chain closure; loader `FUN_00658870`/
+  `FUN_0065a900`/`FUN_006617d0`. Object (dir@0x20) + streamblock (dir@0x44) variants. Splice recomputes
+  offsets; composes with sab_pack. `scan` = 0 in-scope mismatches on 1000+ real sub-packs. Closes drop-in
+  multi-asset bundles. Doc: tools/sab_sbla/SBLA_SUBPACK_FORMAT.md.
+- ⚠️ **World/startup pack path_crc** (docs/formats/world_megapack_key.md): both converged — the megapack
+  index field is the streamblock ID/ordinal (NOT name_crc); name_crc=pandemic_hash(name) at ALBS+8;
+  path_crc is per-instance. FORM pinned: `pandemic_hash("<name>.pack")` (suffix `DAT_00fc4594="pack"`,
+  sprintf @FUN_00658870), `<name>` = object's runtime logical name from the map-file loader
+  (`WSStreamingManager`) → **EXTERNAL, not reproducible from pack data**. Close via x32dbg / [[vmx128-xenon-decomp]].
+- ✅ **PC symbol map** → `data/symbol_map/pc_symbol_map.tsv` (1,414 names) — see [[prototype-symbols-goldmine]].
+
+**Still open / next:** wire name→key into `sab_pack` (compute keys, no hex); the world-pack `<name>` source
+(x32dbg log-bp on `FUN_00658870`/`FUN_00db7c10`); shift-aware rescue of drifted classes in the symbol map.
+**Live validation (x32dbg):** drop a `patchdynamic0.megapack`, breakpoint mount `FUN_00e34f70` + bsearch
+`FUN_00e42740` — confirm it loads in-engine (still INFERRED, the last asterisk before shipping to the
+community). See [[community-contribution-plan]].
