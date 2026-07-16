@@ -1,0 +1,12 @@
+[package]
+name = "sab_pack"
+version = "0.1.0"
+edition = "2021"
+description = "Writer/round-trip tool for The Saboteur (2009) .megapack containers (magic 00PM); packs one extracted SBLA sub-pack into a valid single-entry megapack and can build patchdynamic0-style override packs. std-only."
+
+[[bin]]
+name = "sab_pack"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
