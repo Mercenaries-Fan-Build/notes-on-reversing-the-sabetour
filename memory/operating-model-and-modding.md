@@ -63,7 +63,19 @@ Our unique assets (from the clean decomp):
   0xD3EF69E0/0xB333DA43. Resolver `FUN_009ef620` routes on the suffix. ⇒ **brand-new assets ARE
   registerable** (not just overrides). Open: world/startup packs (Mega*/Start0) use a different path
   string for path_crc. This is the key hash — the crc "hashes an external path" IS recoverable.
-- ⏳ **DTEX** (textures, reskins) — one investigator in (259/259 byte-identical), adjudication pending.
+  ADJUDICATED (2nd investigator diverged, claimed crc non-reproducible via a CinematicTextures
+  counterexample — but that test OMITTED the `global\` prefix; `pandemic_hash("global\Cinematic`
+  `Textures.dynpack")==0x0CCCD1DB` = real crc; verified on PauseMenu/CinematicTextures/Act1_IntKey/
+  AMBCat_CellKey). 2nd investigator DID contribute: index=pandemic_hash(name) at full 759 scale (names
+  reversed from the hash→string table in loosefiles_BinPC.pack), the resolver chain, and the loader
+  sprintf sites that generalize the string: `<name>.dynpack` (FUN_009f2530), `<name>.palettepack`
+  (FUN_009f1520), `France\EditNodes\<name>` (FUN_00a037f0).
+- ✅ **DTEX** (textures, reskins) → `tools/sab_dtex` (cb3742a). No on-disk magic; length-prefixed records
+  in SBLA; u32 nameLen+name (pandemic_hash=ALBS key), u32 format (DXT1/3/5/D3DFMT), flags, u16 w/h/mips,
+  u32 uncompressedSize, u32 numStreams, {u32 compSize, zlib}×. Per-mip 24B descriptor; multi-stream split
+  at 0x180000. Verified 12,559 reads + round-trip. Recompress isn't byte-exact (2009 deflate) → --preserve
+  for exact; edited textures re-inflate fine. Remaining: SBLA sub-pack writer w/ ALBS-directory fixup for
+  drop-in multi-texture reskins.
 
 **Still open / next:** wire name→key into `sab_pack` (compute keys, no hex); world-pack path convention;
 DTEX adjudication. **Live validation (x32dbg, later):** drop a `patchdynamic0.megapack`, breakpoint mount

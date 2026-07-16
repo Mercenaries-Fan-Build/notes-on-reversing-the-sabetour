@@ -1,5 +1,20 @@
 # Megapack index key — SOLVED
 
+> **Adjudication (double-blind, 2 investigators).** Both independently confirmed
+> `index = pandemic_hash(name)` (759/759). They diverged on `crc`: one derived
+> `crc = pandemic_hash("global\<name>.dynpack")`; the other reported it non-reproducible with a
+> `CinematicTextures` counterexample. **Adjudicated in favour of the formula** — it reproduces the
+> real crc on *every* entry tested, including the counterexample: `pandemic_hash("global\Cinematic`
+> `Textures.dynpack") == 0x0CCCD1DB` (the real crc); the negative result had tested the string
+> *without* the `global\` prefix. Cross-verified here on `PauseMenu`, `CinematicTextures`,
+> `Act1_IntKey`, `AMBCat_CellKey` — all match.
+>
+> **Generalization (from the loader `sprintf` call sites the 2nd investigator found):** the pre-hash
+> string is `"<name>.<packtype>"` under a folder — `FUN_009f2530` builds `"<name>.dynpack"`,
+> `FUN_009f1520` builds `"<name>.palettepack"`, `FUN_00a037f0` builds `"France\EditNodes\<name>"`.
+> Dynamic0/Palettes0 confirmed empirically; world/startup packs (`Mega*`/`Start0`) use a different
+> string still to be pinned. `index` is always `pandemic_hash(name)` and is the by-name resolve key.
+
 **Question:** exactly what string does the engine hash to produce a `.megapack` (MP00) entry's
 lookup key, so a modder can register a *new* asset the engine will find by-hash?
 
