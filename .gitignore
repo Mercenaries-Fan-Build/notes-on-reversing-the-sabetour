@@ -16,6 +16,13 @@ output/*
 *.skel
 saboteur_all_functions_decomp.txt
 
+# Game files, prototype build, and extracted symbols — never commit (copyrighted / huge)
+game-files/
+*.pdb
+*.map
+*.xex
+*.7z
+
 # Scratch
 _scratch/
 *.tmp
