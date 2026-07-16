@@ -83,11 +83,18 @@ Our unique assets (from the clean decomp):
   `FUN_0065a900`/`FUN_006617d0`. Object (dir@0x20) + streamblock (dir@0x44) variants. Splice recomputes
   offsets; composes with sab_pack. `scan` = 0 in-scope mismatches on 1000+ real sub-packs. Closes drop-in
   multi-asset bundles. Doc: tools/sab_sbla/SBLA_SUBPACK_FORMAT.md.
-- ⚠️ **World/startup pack path_crc** (docs/formats/world_megapack_key.md): both converged — the megapack
-  index field is the streamblock ID/ordinal (NOT name_crc); name_crc=pandemic_hash(name) at ALBS+8;
-  path_crc is per-instance. FORM pinned: `pandemic_hash("<name>.pack")` (suffix `DAT_00fc4594="pack"`,
-  sprintf @FUN_00658870), `<name>` = object's runtime logical name from the map-file loader
-  (`WSStreamingManager`) → **EXTERNAL, not reproducible from pack data**. Close via x32dbg / [[vmx128-xenon-decomp]].
+- ⚠️ **World/startup pack path_crc** (docs/formats/world_megapack_key.md): the index field is the
+  streamblock ID/ordinal (NOT name_crc); name_crc=pandemic_hash(name) at ALBS+8; path_crc is per-instance.
+  **CORRECTION** (a deeper sub-search, self-verified): the `pandemic_hash("<name>.pack")` form one
+  investigator claimed is **DISPROVEN** — `ph("France\0.pack")` matches ID=0's crc by coincidence but
+  `ph("France\1024.pack")≠` ID=1024's crc. Structural truth: the world/streamblock key is a **stored
+  PblCRC in the MAP6 stream-TOC** (`WSStreamTOC(PblCRC,…)`; loader `FUN_009f2df0`), NOT a load-time string
+  hash — its preimage exists only in the offline cooker. Ruled out streamblock+object forms via
+  meet-in-the-middle hash inversion (definitive negative). **Recover via:** x32dbg hw-bp on `FUN_00dc1e20`
+  (filter by return crc → read arg1 string) OR the retail `France.map`/WSD stream-TOC (stores name→PblCRC).
+  See [[vmx128-xenon-decomp]].
+  ★LESSON: I committed the ".pack" form before this deeper check disproved it — self-verify surprising
+  "CONFIRMED-from-decomp" claims (esp. inferred string forms) against real keys BEFORE committing.
 - ✅ **PC symbol map** → `data/symbol_map/pc_symbol_map.tsv` (1,414 names) — see [[prototype-symbols-goldmine]].
 
 **Still open / next:** wire name→key into `sab_pack` (compute keys, no hex); the world-pack `<name>` source
