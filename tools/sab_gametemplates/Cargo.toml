@@ -1,0 +1,12 @@
+[package]
+name = "sab_gametemplates"
+version = "0.1.0"
+edition = "2021"
+description = "Reader/writer for The Saboteur (2009) GameTemplates.wsd (magic AULB) object-definition templates"
+
+[[bin]]
+name = "sab_gametemplates"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
