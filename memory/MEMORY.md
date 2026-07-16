@@ -5,6 +5,7 @@ One line per durable note. Detail lives in the note file and in `docs/`. Keep li
 ## Orientation
 - [Read lineage_and_divergence first](../docs/lineage_and_divergence.md) — ★shared-vs-different vs Mercs 2; never copy a Mercs 2 offset/struct/Havok detail without re-deriving. Identical: hash, sges, LuaQ 5.1, f16, Pebble. Different: everything binary-layout.
 - [prototype-symbols-goldmine](prototype-symbols-goldmine.md) — ★2008 Xbox360 prototype ships FULL PDBs + a 119,119-symbol linker map with source .obj per function (2,275 TUs). PblCRC=the hash, WSConduit=resolver, damage/explosion solver NAMED. game-files/symbols/ (gitignored). The force-multiplier to name the whole PC decomp.
+- [vmx128-xenon-decomp](vmx128-xenon-decomp.md) — ★VMX128 (Xbox360 Xenon vector ISA) encodings = enabler to fully DECOMP the symbol-rich prototype .xex (Ghidra XEX + SLEIGH VMX128 + PDB import). Richer oracle than the .map. Ref: biallas.net/doc/vmx128. Verify vs PC.
 - [clean-binary-and-symbols](clean-binary-and-symbols.md) — retail GOG Saboteur.exe is UNPACKED (no SecuROM); 2765 RTTI + 898 Lua bindings + 36,935-fn decomp = the oracle. docs/binary_recon.md.
 
 ## Formats
