@@ -34,7 +34,14 @@ May 20 2008) ships **full debug symbols**. Extracted to `game-files/symbols/` (g
 some code differs. Use it as a **naming oracle** (name + source-file + signature), then verify each
 against the PC decomp. Don't assume a 2008 struct offset holds in the 2009 retail PC build.
 
-**★Biggest next force-multiplier:** symbol-NAME the 36,935-fn PC decomp by correlating it to the 360 map
-(by source-file clustering + call-graph/behavior/BSim matching), and parse the PDBs for struct field
-names. Turns docs/symbol_map from ~286 pinned fns into a fully-named engine. See [[symbol-map-methodology]].
+**✅ DONE — PC symbol map built** (`data/symbol_map/pc_symbol_map.tsv`, 6d71a44): **1,414 PC function
+names** from the 360 prototype via double-blind (RTTI vtable-slot alignment gated to equal-length classes
++ assert anchors). 824 double-blind-confirmed (`source=both`), 578 single-source, 12 conflict-reconciled.
+Validated: 98% vs assert catalog, 118/118 pure-virtual structural test. **Excluded** the drifted
+`WSConduit`/game-object hierarchy (vtables grew 2008→2009 — class ID known, method slots NOT). Names
+transfer, addresses do NOT. Methodology in `tools/xsym/`; see data/symbol_map/README.md.
+
+**Next force-multipliers:** (1) a shift-aware rescue of the drifted `WSConduit`/`WSHuman`/`WSVehicle`/
+`WSWeapon` families (align via anchors, not naive slot). (2) parse the PDBs for struct FIELD names.
+(3) the full [[vmx128-xenon-decomp]] (decompile the 360 .xex → named logic, richer than the .map).
 Also: prototype `Global.map`/`GameTemplates`/`.lua`/`.hkx` for format cross-checks.
