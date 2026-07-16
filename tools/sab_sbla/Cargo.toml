@@ -1,0 +1,12 @@
+[package]
+name = "sab_sbla"
+version = "0.1.0"
+edition = "2021"
+description = "The Saboteur (2009) SBLA/ALBS sub-pack directory reader+writer: parse the internal hash->offset directory and rebuild/splice a multi-asset sub-pack byte-identically. std-only."
+
+[[bin]]
+name = "sab_sbla"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
