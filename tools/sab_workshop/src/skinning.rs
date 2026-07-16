@@ -79,6 +79,13 @@ fn world_matrices(skel: &[Bone], locals: &[Mat4]) -> Vec<Mat4> {
     world
 }
 
+/// Bind-pose WORLD matrix per bone (no inv_bind applied). Rigid attachments authored in a bone's
+/// LOCAL space are lifted into bind space with this — see `formats::bind_rigid_attachments`.
+pub fn bind_world(skel: &[Bone]) -> Vec<Mat4> {
+    let locals: Vec<Mat4> = skel.iter().map(bind_local).collect();
+    world_matrices(skel, &locals)
+}
+
 /// Joint matrices for the bind pose (all animated tracks unset). At bind pose each
 /// `jointMatrix` should be ~identity if inv_bind is consistent.
 pub fn bind_pose(skel: &[Bone]) -> Vec<Mat4> {
@@ -89,12 +96,23 @@ pub fn bind_pose(skel: &[Bone]) -> Vec<Mat4> {
 
 /// Joint matrices for a posed frame. `pose` is one QsTransform per animation track,
 /// `track_to_bone[k]` the skeleton bone that track k drives (-1 = unbound, ignored).
-pub fn posed(skel: &[Bone], pose: &[QsTransform], track_to_bone: &[i32]) -> Vec<Mat4> {
+///
+/// `lock_root`: strip ROOT MOTION. Clips animate the root (`GlobalSRT`) travelling metres — the game
+/// applies that to the ENTITY, not the mesh, so in a fixed-camera previewer it just walks the
+/// character out of frame (and looks like the pose is broken). Locking keeps the root's BIND
+/// translation while still honouring its animated rotation/scale, so the clip plays in place.
+pub fn posed(skel: &[Bone], pose: &[QsTransform], track_to_bone: &[i32], lock_root: bool) -> Vec<Mat4> {
     let mut locals: Vec<Mat4> = skel.iter().map(bind_local).collect();
     for (k, q) in pose.iter().enumerate() {
         let bone = track_to_bone.get(k).copied().unwrap_or(-1);
         if bone >= 0 && (bone as usize) < locals.len() {
-            locals[bone as usize] = anim_local(q);
+            let b = bone as usize;
+            let mut q2 = *q;
+            if lock_root && skel[b].parent < 0 {
+                // Root bone: keep bind translation, keep animated rotation/scale.
+                q2.t = [skel[b].t[0], skel[b].t[1], skel[b].t[2], 1.0];
+            }
+            locals[b] = anim_local(&q2);
         }
     }
     let world = world_matrices(skel, &locals);

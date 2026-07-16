@@ -16,6 +16,21 @@ pub struct Bone {
     pub inv_bind: Option<[f32; 16]>, // row-major inverse bind matrix
 }
 
+/// One draw-range / sub-mesh: a contiguous slice of the index buffer with the material that
+/// authored it. `material_hash` is a `pandemic_hash` of a WSAO material name (resolved to textures
+/// by `tools/sab_wsao`). Preserved verbatim from `sab_mesh` through `merge_smsh.py` (which offsets
+/// `index_start` across the merged parts), so a merged character mesh keeps one prim per part-material.
+#[derive(Clone, Copy)]
+pub struct Prim {
+    pub index_start: u32,
+    pub index_count: u32,
+    pub material_hash: u32,
+    pub flags: u32,
+    /// Rigid-attachment bone for UNSKINNED geometry (hats/props) — `DrawCall.parentBone`. Only
+    /// present in SMSH v2; a v1 file reads back 0 and its accessories cannot be placed.
+    pub parent_bone: u16,
+}
+
 /// Decoded SMSH geometry.
 pub struct Smsh {
     pub positions: Vec<[f32; 3]>,
@@ -24,6 +39,108 @@ pub struct Smsh {
     pub joints: Vec<[u16; 4]>, // GLOBAL skeleton bone indices
     pub weights: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
+    pub prims: Vec<Prim>, // per-material draw ranges (empty for a pre-prims SMSH)
+}
+
+/// A non-overlapping draw range with the material(s) that authored it — the unit the renderer binds
+/// a texture to and draws. `materials` are candidate material hashes in drawcall order (a range may
+/// carry several: LOD / damage / detail passes); the first is the default diffuse pick.
+#[derive(Clone)]
+pub struct SubMesh {
+    pub index_start: u32,
+    pub index_count: u32,
+    pub materials: Vec<u32>,
+}
+
+/// Reduce the (possibly overlapping) per-drawcall `prims` to a clean cover of the index buffer.
+///
+/// `sab_mesh` emits one prim per drawcall, so a mesh part shows up as a coarse "whole" range plus its
+/// split children, and several drawcalls (materials) can target the same range (LOD / damage passes).
+/// We keep only **leaf** ranges — those that don't strictly contain another distinct range — and
+/// collapse identical ranges into one `SubMesh` carrying every candidate material. If the leaves do
+/// not tile `[0, total_indices)` exactly (unexpected overlap/gap), we fall back to a single
+/// whole-buffer submesh so the mesh still renders (untextured) rather than double-drawing geometry.
+pub fn submesh_cover(prims: &[Prim], total_indices: u32) -> Vec<SubMesh> {
+    let whole = || vec![SubMesh { index_start: 0, index_count: total_indices, materials: Vec::new() }];
+    if prims.is_empty() {
+        return whole();
+    }
+    // Distinct ranges, first-seen order, accumulating candidate materials per range.
+    let mut ranges: Vec<(u32, u32, Vec<u32>)> = Vec::new(); // (start, count, materials)
+    for p in prims {
+        if p.index_count == 0 {
+            continue;
+        }
+        match ranges.iter_mut().find(|(s, c, _)| *s == p.index_start && *c == p.index_count) {
+            Some((_, _, mats)) => {
+                if !mats.contains(&p.material_hash) {
+                    mats.push(p.material_hash);
+                }
+            }
+            None => ranges.push((p.index_start, p.index_count, vec![p.material_hash])),
+        }
+    }
+    // A leaf strictly contains no other distinct range.
+    let contains = |a: &(u32, u32, Vec<u32>), b: &(u32, u32, Vec<u32>)| {
+        let (ae, be) = (a.0 + a.1, b.0 + b.1);
+        a.0 <= b.0 && ae >= be && (a.0 != b.0 || a.1 != b.1)
+    };
+    let mut leaves: Vec<SubMesh> = ranges
+        .iter()
+        .filter(|r| !ranges.iter().any(|o| contains(r, o)))
+        .map(|(s, c, m)| SubMesh { index_start: *s, index_count: *c, materials: m.clone() })
+        .collect();
+    leaves.sort_by_key(|s| s.index_start);
+    // Verify the leaves tile [0, total) exactly.
+    let mut pos = 0u32;
+    let tiles = leaves.iter().all(|s| {
+        let ok = s.index_start == pos;
+        pos = s.index_start + s.index_count;
+        ok
+    }) && pos == total_indices;
+    if tiles && !leaves.is_empty() {
+        leaves
+    } else {
+        whole()
+    }
+}
+
+/// Rigidly bind UNSKINNED geometry to its prim's `parent_bone`.
+///
+/// Accessories (hats, props) ship with NO skin weights and are authored around the origin; the engine
+/// parents them to `DrawCall.parentBone`. Left alone they render at the world origin — Sean's hat on
+/// the floor between his feet. Rather than special-case them in the shader, give each weightless
+/// vertex one full-weight influence on its prim's parent bone, so the ordinary skinning path
+/// (`jointMatrix[parent] * pos`) places AND animates it for free. Needs SMSH v2 (v1 has no field).
+pub fn bind_rigid_attachments(m: &mut Smsh, bind_world: &[glam::Mat4]) {
+    let mut done = vec![false; m.positions.len()];
+    for prim in &m.prims {
+        let pb = prim.parent_bone as usize;
+        let Some(bw) = bind_world.get(pb) else { continue };
+        let start = prim.index_start as usize;
+        let end = (start + prim.index_count as usize).min(m.indices.len());
+        for &idx in &m.indices[start..end] {
+            let v = idx as usize;
+            if v >= m.weights.len() || done[v] {
+                continue;
+            }
+            let w = m.weights[v];
+            if w[0] + w[1] + w[2] + w[3] > 0.0001 {
+                continue; // genuinely skinned — leave it be
+            }
+            done[v] = true;
+            // The vertex is in the BONE'S LOCAL space; skinning expects BIND space. Lift it:
+            //   jointMatrix[pb] * (bindWorld[pb] * p) == world[pb] * inv_bind[pb] * bindWorld[pb] * p
+            //                                         == world[pb] * p          (inv_bind = bindWorld^-1)
+            // i.e. exactly "rigidly parented to that bone", posed correctly for free.
+            let p = glam::Vec3::from_array(m.positions[v]);
+            m.positions[v] = bw.transform_point3(p).to_array();
+            let n = glam::Vec3::from_array(m.normals[v]);
+            m.normals[v] = bw.transform_vector3(n).normalize_or_zero().to_array();
+            m.joints[v] = [prim.parent_bone, 0, 0, 0];
+            m.weights[v] = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
 }
 
 pub fn read_smsh(b: &[u8]) -> Result<Smsh, String> {
@@ -35,8 +152,13 @@ pub fn read_smsh(b: &[u8]) -> Result<Smsh, String> {
     let rd_u16 = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
     let nv = rd_u32(8) as usize;
     let ni = rd_u32(12) as usize;
-    // Bounds check: header claims nv verts + ni indices in the fixed-stride layout below.
-    let need = 20 + nv * (12 + 12 + 8 + 8 + 16) + ni * 4;
+    let version = rd_u32(4);
+    let np = rd_u32(16) as usize; // num prims (0 for a pre-prims SMSH)
+    // v1 prims are 16 B {start,count,material,flags}; v2 appends u16 parentBone (+u16 pad) = 20 B.
+    let prim_stride = if version >= 2 { 20 } else { 16 };
+    // Bounds check: header claims nv verts + ni indices in the fixed-stride layout below, then
+    // np * 16-byte prim records at the tail.
+    let need = 20 + nv * (12 + 12 + 8 + 8 + 16) + ni * 4 + np * prim_stride;
     if b.len() < need {
         return Err(format!("SMSH truncated: need {need} bytes, have {}", b.len()));
     }
@@ -58,7 +180,21 @@ pub fn read_smsh(b: &[u8]) -> Result<Smsh, String> {
     p += nv * 16;
     let mut indices = Vec::with_capacity(ni);
     for i in 0..ni { indices.push(rd_u32(p + i * 4)); }
-    Ok(Smsh { positions, normals, uvs, joints, weights, indices })
+    p += ni * 4;
+    let mut prims = Vec::with_capacity(np);
+    for i in 0..np {
+        let o = p + i * prim_stride;
+        prims.push(Prim {
+            index_start: rd_u32(o),
+            index_count: rd_u32(o + 4),
+            material_hash: rd_u32(o + 8),
+            flags: rd_u32(o + 12),
+            parent_bone: if version >= 2 { rd_u16(o + 16) } else { 0 },
+        });
+    }
+    // NOTE: rigid attachments need the skeleton (bind world), so callers must run
+    // `bind_rigid_attachments` once they have it.
+    Ok(Smsh { positions, normals, uvs, joints, weights, indices, prims })
 }
 
 /// Read a whitespace `.skel` file: one bone per line

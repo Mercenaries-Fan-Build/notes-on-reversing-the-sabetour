@@ -12,10 +12,14 @@
 mod anim_index;
 mod app;
 mod camera;
+mod dtex;
 mod formats;
 mod gui;
 mod havok;
+mod meshload;
+mod pack;
 mod render;
+mod resolve;
 mod skinning;
 
 /// Resolved input paths (CLI overrides the built-in defaults).
@@ -24,6 +28,12 @@ pub struct Config {
     pub skel: String,
     pub index: String,
     pub pack: String,
+    /// Megapack the character's DTEX texture bundles live in (in-app texture resolution).
+    pub megapack: String,
+    /// Case-insensitive DTEX-name token identifying the character's textures (e.g. "SeanDevlinn").
+    pub char_token: String,
+    /// The shared palette archive — props/vehicles keep their skins here rather than beside the mesh.
+    pub palettes: String,
 }
 
 impl Default for Config {
@@ -33,6 +43,9 @@ impl Default for Config {
             skel: "c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output/skeletons/CH_AL_SeanDevlin.skel".into(),
             index: "c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output/anim_bone_map.json".into(),
             pack: "C:/GOG Games/The Saboteur/Animations.pack".into(),
+            megapack: "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack".into(),
+            char_token: "SeanDevlinn".into(),
+            palettes: "C:/GOG Games/The Saboteur/Global/Palettes0.megapack".into(),
         }
     }
 }
@@ -51,9 +64,16 @@ fn main() {
     if let Some(v) = get("--skel") { cfg.skel = v; }
     if let Some(v) = get("--index") { cfg.index = v; }
     if let Some(v) = get("--pack") { cfg.pack = v; }
+    if let Some(v) = get("--megapack") { cfg.megapack = v; }
+    if let Some(v) = get("--char") { cfg.char_token = v; }
+    if let Some(v) = get("--palettes") { cfg.palettes = v; }
 
     // Headless verification of the load -> decode -> skin path (no window). Optional clip index
     // into the playable list: `--selftest [N]`.
+    if let Some(i) = args.iter().position(|a| a == "--anim-sweep") {
+        let n: usize = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(200);
+        std::process::exit(app::anim_sweep(cfg, n));
+    }
     if let Some(i) = args.iter().position(|a| a == "--selftest") {
         let n: usize = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
         std::process::exit(app::selftest(cfg, n));

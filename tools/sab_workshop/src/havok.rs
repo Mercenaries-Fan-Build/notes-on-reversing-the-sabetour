@@ -343,12 +343,31 @@ pub fn read_spline_anim(pk: &Packfile, obj_src: usize) -> SplineAnim {
 impl SplineAnim {
     fn block_and_frame(&self, time: f32) -> (usize, f32, u8) {
         let bi = if self.num_blocks <= 1 { 0 }
-                 else { ((time / self.block_duration).floor() as i64)
+                 else { ((time * self.block_inv_duration).trunc() as i64)
                         .clamp(0, self.num_blocks as i64 - 1) as usize };
         let block_time = time - bi as f32 * self.block_duration;
+        // TRUNCATE, never round. Per the decomp (`FUN_00eb8120`, via `FUN_00e47360` = cvttsd2si):
+        //   frameInBlk = trunc(blockTime * blockInvDuration * (maxFramesPerBlock - 1))
+        // `frameInBlk` only picks the knot SPAN (`find_span`), while de Boor evaluates at the
+        // continuous `block_time`. Rounding UP selects the next span while the time is still inside
+        // the previous one, so the basis EXTRAPOLATES instead of interpolating and the pose blows up
+        // — data-dependent, hitting only frames whose fractional part is >= 0.5 (~19% of clips).
         let fib = (block_time * self.block_inv_duration * (self.max_frames_per_block as f32 - 1.0))
-            .round().clamp(0.0, 255.0) as u8;
+            .trunc().clamp(0.0, 255.0) as u8;
         (bi, block_time, fib)
+    }
+
+    /// The raw per-track 4-byte masks `[ctrl, transMask, rotMask, scaleMask]` of a block — the
+    /// corpus was reported as uniformly `ctrl=0x45` (type-1 everything); anything else means we are
+    /// on one of the INFERRED, never-validated quantization paths.
+    pub fn track_masks(&self, blob: &[u8], block: usize) -> Vec<[u8; 4]> {
+        let block_start = self.data_off + self.block_offsets.get(block).copied().unwrap_or(0) as usize;
+        (0..self.num_transform_tracks)
+            .map(|t| {
+                let h = block_start + t * 4;
+                [blob[h], blob[h + 1], blob[h + 2], blob[h + 3]]
+            })
+            .collect()
     }
 
     /// Sample all transform tracks at `time` (seconds). Returns one QsTransform per track.

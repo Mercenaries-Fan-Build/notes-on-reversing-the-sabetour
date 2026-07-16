@@ -7,7 +7,8 @@ use glam::Mat4;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::formats::Smsh;
+use crate::dtex::CpuTexture;
+use crate::formats::{self, Smsh, SubMesh};
 use crate::gui::Gui;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -19,6 +20,7 @@ struct Vertex {
     normal: [f32; 3],
     joints: [u16; 4],
     weights: [f32; 4],
+    uv: [f32; 2],
 }
 
 #[repr(C)]
@@ -52,12 +54,22 @@ pub struct Renderer {
     ibo: wgpu::Buffer,
     index_count: u32,
 
+    // Per-submesh (leaf-range cover) draw list + its bound diffuse texture. `None` = untextured →
+    // the shared 1x1 white texture (looks like the old flat shading). Same order as `submeshes`.
+    submeshes: Vec<SubMesh>,
+    submesh_bg: Vec<Option<wgpu::BindGroup>>,
+    tex_bgl: wgpu::BindGroupLayout,
+    scene_bgl: wgpu::BindGroupLayout, // kept so the joint buffer can be resized on a mesh swap
+    sampler: wgpu::Sampler,
+    white_bg: wgpu::BindGroup,
+
     grid_pipeline: wgpu::RenderPipeline,
     grid_vbo: wgpu::Buffer,
     grid_count: u32,
 
     joint_count: usize,
     pub show_grid: bool,
+    pub show_textures: bool,
 }
 
 impl Renderer {
@@ -149,8 +161,49 @@ impl Renderer {
             ],
         });
 
+        // --- per-material texture bind group (group 1) ---
+        let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tex bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("diffuse sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        // 1x1 white fallback: an unresolved submesh renders as plain lit geometry.
+        let white_bg = make_tex_bind_group(&device, &queue, &tex_bgl, &sampler, 1, 1, &[255, 255, 255, 255]);
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene pl"),
+            bind_group_layouts: &[&bgl, &tex_bgl],
+            push_constant_ranges: &[],
+        });
+        // The grid pipeline uses group 0 only, so it needs its own layout (no texture group).
+        let grid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("grid pl"),
             bind_group_layouts: &[&bgl],
             push_constant_ranges: &[],
         });
@@ -170,7 +223,7 @@ impl Renderer {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x3, 1 => Float32x3, 2 => Uint16x4, 3 => Float32x4
+                        0 => Float32x3, 1 => Float32x3, 2 => Uint16x4, 3 => Float32x4, 4 => Float32x2
                     ],
                 }],
                 compilation_options: Default::default(),
@@ -202,16 +255,7 @@ impl Renderer {
         });
 
         // --- mesh buffers ---
-        let n = mesh.positions.len();
-        let mut verts = Vec::with_capacity(n);
-        for i in 0..n {
-            verts.push(Vertex {
-                pos: mesh.positions[i],
-                normal: *mesh.normals.get(i).unwrap_or(&[0.0, 1.0, 0.0]),
-                joints: *mesh.joints.get(i).unwrap_or(&[0, 0, 0, 0]),
-                weights: *mesh.weights.get(i).unwrap_or(&[1.0, 0.0, 0.0, 0.0]),
-            });
-        }
+        let verts = build_vertices(mesh);
         let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vbo"),
             contents: bytemuck::cast_slice(&verts),
@@ -224,6 +268,10 @@ impl Renderer {
         });
         let index_count = mesh.indices.len() as u32;
 
+        // Non-overlapping per-material draw list; every submesh starts untextured (white).
+        let submeshes = formats::submesh_cover(&mesh.prims, index_count);
+        let submesh_bg = (0..submeshes.len()).map(|_| None).collect();
+
         // --- grid pipeline + geometry ---
         let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("grid shader"),
@@ -231,7 +279,7 @@ impl Renderer {
         });
         let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("grid pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&grid_layout),
             vertex: wgpu::VertexState {
                 module: &grid_shader,
                 entry_point: "vs_main",
@@ -289,11 +337,18 @@ impl Renderer {
             vbo,
             ibo,
             index_count,
+            submeshes,
+            submesh_bg,
+            tex_bgl,
+            scene_bgl: bgl,
+            sampler,
+            white_bg,
             grid_pipeline,
             grid_vbo,
             grid_count,
             joint_count: jc,
             show_grid: true,
+            show_textures: true,
         })
     }
 
@@ -323,6 +378,83 @@ impl Renderer {
             data.push(mats.get(i).copied().unwrap_or(Mat4::IDENTITY).to_cols_array_2d());
         }
         self.queue.write_buffer(&self.joint_buf, 0, bytemuck::cast_slice(&data));
+    }
+
+    /// The per-material draw list (leaf-range cover). The resolver walks this to map each submesh's
+    /// candidate material hashes to a diffuse DTEX.
+    pub fn submeshes(&self) -> &[SubMesh] {
+        &self.submeshes
+    }
+
+    /// Swap in a different model at runtime (the navigator's click-to-load). Rebuilds the vertex /
+    /// index buffers and the per-material draw list, drops every bound texture, and — when the new
+    /// rig has a different bone count — reallocates the joint storage buffer (which forces the scene
+    /// bind group to be rebuilt, since it points at that buffer).
+    pub fn set_mesh(&mut self, mesh: &Smsh, bone_count: usize) {
+        let verts = build_vertices(mesh);
+        self.vbo = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh vbo"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        self.ibo = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh ibo"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.index_count = mesh.indices.len() as u32;
+        self.submeshes = formats::submesh_cover(&mesh.prims, self.index_count);
+        self.submesh_bg = (0..self.submeshes.len()).map(|_| None).collect();
+
+        let jc = bone_count.max(1);
+        if jc != self.joint_count {
+            self.joint_count = jc;
+            let ident: Vec<[[f32; 4]; 4]> = vec![Mat4::IDENTITY.to_cols_array_2d(); jc];
+            self.joint_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("joints"),
+                contents: bytemuck::cast_slice(&ident),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+            self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scene bg"),
+                layout: &self.scene_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.joint_buf.as_entire_binding() },
+                ],
+            });
+        }
+    }
+
+    /// Upload `tex` as submesh `i`'s diffuse. Replaces any previous texture on that submesh.
+    pub fn set_submesh_texture(&mut self, i: usize, tex: &CpuTexture) {
+        if i >= self.submeshes.len() {
+            return;
+        }
+        let bg = make_tex_bind_group(
+            &self.device,
+            &self.queue,
+            &self.tex_bgl,
+            &self.sampler,
+            tex.width.max(1),
+            tex.height.max(1),
+            &tex.rgba,
+        );
+        self.submesh_bg[i] = Some(bg);
+    }
+
+    /// Unassign submesh `i`'s texture (it falls back to white).
+    pub fn clear_submesh_texture(&mut self, i: usize) {
+        if let Some(b) = self.submesh_bg.get_mut(i) {
+            *b = None;
+        }
+    }
+
+    /// Drop every resolved texture (back to the flat white look).
+    pub fn clear_textures(&mut self) {
+        for b in &mut self.submesh_bg {
+            *b = None;
+        }
     }
 
     /// Draw one frame: 3D scene (grid + skinned mesh) then the egui overlay.
@@ -370,13 +502,89 @@ impl Renderer {
             pass.set_pipeline(&self.mesh_pipeline);
             pass.set_vertex_buffer(0, self.vbo.slice(..));
             pass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.index_count, 0, 0..1);
+            // One draw per submesh, each with its own diffuse (or the white fallback). When textures
+            // are toggled off, everything binds white → the original flat-lit look.
+            for (i, sm) in self.submeshes.iter().enumerate() {
+                let bg = match (self.show_textures, &self.submesh_bg[i]) {
+                    (true, Some(b)) => b,
+                    _ => &self.white_bg,
+                };
+                pass.set_bind_group(1, bg, &[]);
+                let end = sm.index_start + sm.index_count;
+                pass.draw_indexed(sm.index_start..end, 0, 0..1);
+            }
         }
         gui.paint(&self.device, &self.queue, &mut encoder, &view, self.size());
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
     }
+}
+
+/// Interleave an `Smsh` into the renderer's vertex layout.
+fn build_vertices(mesh: &Smsh) -> Vec<Vertex> {
+    (0..mesh.positions.len())
+        .map(|i| Vertex {
+            pos: mesh.positions[i],
+            normal: *mesh.normals.get(i).unwrap_or(&[0.0, 1.0, 0.0]),
+            joints: *mesh.joints.get(i).unwrap_or(&[0, 0, 0, 0]),
+            weights: *mesh.weights.get(i).unwrap_or(&[1.0, 0.0, 0.0, 0.0]),
+            uv: *mesh.uvs.get(i).unwrap_or(&[0.0, 0.0]),
+        })
+        .collect()
+}
+
+/// Upload `rgba` (w*h*4, straight-alpha) as an `Rgba8Unorm` texture and build a group-1 bind group
+/// (texture + sampler). We keep the stored bytes as-is (no sRGB decode) so the preview matches a raw
+/// DDS view and stays consistent with the flat/grid passes, which don't gamma-correct either.
+fn make_tex_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+) -> wgpu::BindGroup {
+    let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("diffuse"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    // Guard against a short/oversized buffer so a malformed decode can't panic write_texture.
+    let need = (w * h * 4) as usize;
+    let mut data = rgba.to_vec();
+    data.resize(need, 0);
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &data,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        size,
+    );
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("diffuse bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
 }
 
 fn make_depth(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
@@ -419,16 +627,20 @@ const MESH_WGSL: &str = r#"
 struct Camera { view_proj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> joints: array<mat4x4<f32>>;
+@group(1) @binding(0) var diffuse: texture_2d<f32>;
+@group(1) @binding(1) var diffuse_samp: sampler;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) joints: vec4<u32>,
     @location(3) weights: vec4<f32>,
+    @location(4) uv: vec2<f32>,
 };
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
+    @location(1) uv: vec2<f32>,
 };
 
 @vertex
@@ -451,6 +663,7 @@ fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     out.clip = camera.view_proj * world_pos;
     out.normal = world_nrm;
+    out.uv = in.uv;
     return out;
 }
 
@@ -461,7 +674,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Two-sided lambert so backfaces aren't black.
     let d = abs(dot(n, l));
     let shade = 0.18 + 0.82 * d;
-    return vec4<f32>(shade * 0.90, shade * 0.93, shade, 1.0);
+    // Diffuse texture (1x1 white when the submesh is unresolved) modulated by the lambert term.
+    let base = textureSample(diffuse, diffuse_samp, in.uv);
+    return vec4<f32>(base.rgb * shade, 1.0);
 }
 "#;
 
