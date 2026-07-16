@@ -43,6 +43,17 @@ are the classic shared-base-virtual ambiguity (base vs derived attribution); rec
   identity is known but per-method slots are NOT reliable; those are not in this map.
 - 2008 pre-release ≠ 2009 retail: verify anything load-bearing against the PC decomp itself.
 
+## `pc_vtables.tsv` — the full class/vtable structure (reference)
+
+`class · slot · method_va · vtable_va · name · name_source` — **every** MSVC RTTI vtable in the retail PC
+`Saboteur.exe`: **2,586 classes, 81,561 slots**, dumped straight from the binary (`tools/xsym/build_pc.py`).
+Names from `pc_symbol_map.tsv` are joined in where known (3,023 slots / 1,191 distinct functions — a
+method appears in every subclass vtable that inherits it, so slots > distinct VAs).
+
+Use it to: see a class's full virtual layout, find a vtable by class, identify which class owns a VA, or
+drive a future **shift-aware rescue** of the drifted classes (align by anchors instead of naive slot
+index). Unnamed slots are honest gaps — drifted classes and non-virtual functions the map doesn't cover.
+
 ## Reproduce
 Scripts in [`../../tools/xsym/`](../../tools/xsym/): `pe.py` (RTTI/vtable walk), `build_pc.py` /
 `build_360.py`, `demangle.py`, `body_names.py` (asserts), `join.py` / `finalize.py`. They read the game
