@@ -1,0 +1,12 @@
+[package]
+name = "sab_megapack_key"
+version = "0.1.0"
+edition = "2021"
+description = "Proof: reproduce Saboteur megapack (MP00) index keys from a resource name string."
+
+[[bin]]
+name = "sab_megapack_key"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
