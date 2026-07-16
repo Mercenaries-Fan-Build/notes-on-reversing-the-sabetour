@@ -1,0 +1,15 @@
+[package]
+name = "sab_dtex"
+version = "0.1.0"
+edition = "2021"
+description = "The Saboteur (2009) DTEX texture reader/writer: DTEX <-> DDS, byte-faithful repack"
+
+[[bin]]
+name = "sab_dtex"
+path = "src/main.rs"
+
+[dependencies]
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
