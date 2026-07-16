@@ -19,5 +19,6 @@ One line per durable note. Detail lives in the note file and in `docs/`. Keep li
 - [symbol-map results](../docs/symbol_map/README.md) — 15 subsystems documented+verified; 286 fns pinned, 264 confirmed-exist. Vehicle&Train verify was re-run after a workflow error.
 
 ## Program
+- [operating-model-and-modding](operating-model-and-modding.md) — ★HOW WE WORK: double-blind RE studies, Rust tooling, agent-groups for assembly analysis, x32dbg deferred. + the modding/write-path program (patch-override, global.map=MAP6, GameTemplates=AULB; community's universal gap). Contact = Global Mod author.
 - [symbol-map-methodology](symbol-map-methodology.md) — ★USER'S GOAL + proven Mercs2 workflow: categorize decomp → parallel agents document → gap/seam passes. Rich anchors (RTTI vtables, 898 bindings, 116k-line Lua corpus, in-file call graph). Scope fan-out with user first.
 - [community-contribution-plan](community-contribution-plan.md) — where our RE amplifies SaboteurToolset/SabTool (extract-only): anim decode, audio (have it), symbol map, repack. docs/community_tooling.md.
