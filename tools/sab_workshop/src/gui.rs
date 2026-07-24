@@ -355,6 +355,54 @@ pub mod theme {
     const OSWALD_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Oswald-Medium.ttf");
     const OSWALD_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Oswald-SemiBold.ttf");
 
+    /// Every non-ASCII glyph the UI paints, in ONE place.
+    ///
+    /// A symbol only renders if some font in its family's stack has that codepoint; there is no
+    /// substitution and no warning — a missing one paints an empty box, silently, forever. That is
+    /// how `▤`/`▦` (rail) and `✓`/`✕` (checklist, clear buttons) shipped as tofu: they look like
+    /// obvious characters, but NOTHING in the stack draws them. Segoe UI carries almost no dingbats,
+    /// and neither Oswald nor egui's Ubuntu-Light carries any — in practice every symbol comes from
+    /// one of the two bundled fallbacks, `NotoEmoji-Regular` and `emoji-icon-font`.
+    ///
+    /// So: every symbol lives here, annotated with the font that actually draws it, and
+    /// `tests::glyphs_are_covered` fails the build if one is not in a BUNDLED font. Bundled-only is
+    /// deliberate — leaning on Segoe UI would pass here and tofu on a machine without it.
+    pub mod sym {
+        /// Rail: the character/animation viewer.        (emoji-icon-font)
+        pub const INSPECT: &str = "◎";
+        /// Rail: GameText.dlg — the pilcrow, for prose. (Segoe/Ubuntu/Oswald — a real letterform)
+        pub const STRINGS: &str = "¶";
+        /// Rail: GameTemplates — stacked rows, a list.  (emoji-icon-font)
+        pub const OBJECTS: &str = "☰";
+        /// Rail + "Pick" button: the texture pool.      (emoji-icon-font)
+        pub const ICONS: &str = "🖼";
+        /// Rail: app configuration.                     (emoji-icon-font)
+        pub const SETTINGS: &str = "⚙";
+
+        /// Checklist: requirement met.                  (NotoEmoji + emoji-icon-font)
+        pub const OK: &str = "✔";
+        /// Checklist: required and missing; also every clear/dismiss button.
+        ///                                              (NotoEmoji + emoji-icon-font)
+        pub const NO: &str = "✖";
+        /// Checklist: optional and missing — not a failure, so an en dash, not a mark.
+        pub const NA: &str = "–";
+
+        /// Transport.                                   (NotoEmoji + emoji-icon-font)
+        pub const PLAY: &str = "▶";
+        ///                                              (emoji-icon-font)
+        pub const PAUSE: &str = "⏸";
+        /// Revert one staged edit.                      (emoji-icon-font)
+        pub const UNDO: &str = "↺";
+
+        /// Everything above, for the coverage test.
+        #[cfg(test)]
+        pub const ALL: &[(&str, &str)] = &[
+            ("INSPECT", INSPECT), ("STRINGS", STRINGS), ("OBJECTS", OBJECTS),
+            ("ICONS", ICONS), ("SETTINGS", SETTINGS), ("OK", OK), ("NO", NO),
+            ("NA", NA), ("PLAY", PLAY), ("PAUSE", PAUSE), ("UNDO", UNDO),
+        ];
+    }
+
     fn load_font(defs: &mut egui::FontDefinitions, key: &str, paths: &[&str]) -> bool {
         for p in paths {
             if let Ok(bytes) = std::fs::read(p) {
@@ -378,7 +426,10 @@ pub mod theme {
             fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "courier".to_owned());
         }
         // Display: bundled Oswald. The proportional stack is appended as a FALLBACK so glyphs
-        // Oswald lacks (▶ ⏸ ✕ ⌕ …) still resolve instead of rendering tofu.
+        // Oswald lacks (▶ ⏸ ↺ … and the rail marks) still resolve instead of rendering tofu.
+        // NOTE: the tail of that stack is egui's own Ubuntu-Light + NotoEmoji + emoji-icon-font, and
+        // those two emoji faces are where essentially every symbol comes from — Segoe UI carries
+        // almost no dingbats. See `sym` for the glyphs this is allowed to draw.
         let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
         for (key, bytes, family) in [
             ("oswald_md", OSWALD_MEDIUM, "disp"),
@@ -895,6 +946,46 @@ pub mod theme {
         p.rect_filled(bar(3.0, 24.0, 0.0), egui::Rounding::ZERO, RED);
         p.rect_filled(bar(11.0, 3.0, -6.0), egui::Rounding::ZERO, RED);
         p.rect_filled(bar(15.0, 3.0, 2.0), egui::Rounding::ZERO, RED);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Every glyph in [`sym`] must be drawable by a font we SHIP — Oswald, or one of the three
+        /// egui bundles (Ubuntu-Light, NotoEmoji, emoji-icon-font).
+        ///
+        /// Hack is excluded on purpose even though it is bundled: it is only reachable from the
+        /// Monospace family, so a symbol that exists *only* in Hack still tofus on the rail. Segoe UI
+        /// is excluded too — it is read from `C:/Windows/Fonts` at runtime and may be absent, and a
+        /// test that trusted it would pass here and ship tofu elsewhere.
+        #[test]
+        fn glyphs_are_covered() {
+            let defs = egui::FontDefinitions::default();
+            let mut faces: Vec<ttf_parser::Face> = Vec::new();
+            for name in ["Ubuntu-Light", "NotoEmoji-Regular", "emoji-icon-font"] {
+                let d = defs.font_data.get(name).unwrap_or_else(|| {
+                    panic!("egui no longer bundles {name}; update this test and `sym`")
+                });
+                faces.push(ttf_parser::Face::parse(d.font.as_ref(), 0).unwrap());
+            }
+            faces.push(ttf_parser::Face::parse(OSWALD_MEDIUM, 0).unwrap());
+            faces.push(ttf_parser::Face::parse(OSWALD_SEMIBOLD, 0).unwrap());
+
+            let mut tofu = Vec::new();
+            for (name, s) in sym::ALL {
+                for ch in s.chars() {
+                    if !faces.iter().any(|f| f.glyph_index(ch).is_some()) {
+                        tofu.push(format!("{name} = {s:?} (U+{:04X})", ch as u32));
+                    }
+                }
+            }
+            assert!(
+                tofu.is_empty(),
+                "no bundled font draws these — they will paint empty boxes:\n  {}",
+                tofu.join("\n  ")
+            );
+        }
     }
 }
 

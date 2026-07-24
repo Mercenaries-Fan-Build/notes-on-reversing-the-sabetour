@@ -1406,13 +1406,16 @@ impl Page {
             Page::Settings => "settings",
         }
     }
+    /// The rail mark. Defined in [`theme::sym`], not inline: a glyph no bundled font draws paints an
+    /// empty box with no error, which is exactly how `▤`/`▦` sat blank on this rail.
     fn glyph(self) -> &'static str {
+        use theme::sym;
         match self {
-            Page::Inspect => "◎",
-            Page::Strings => "¶",
-            Page::Objects => "▤",
-            Page::Icons => "▦",
-            Page::Settings => "⚙",
+            Page::Inspect => sym::INSPECT,
+            Page::Strings => sym::STRINGS,
+            Page::Objects => sym::OBJECTS,
+            Page::Icons => sym::ICONS,
+            Page::Settings => sym::SETTINGS,
         }
     }
     /// The editor page this maps to, or `None` for the pages that are not editor views
@@ -1565,9 +1568,9 @@ fn settings_page(ctx: &egui::Context, sx: &mut SettingsCtx) {
             for c in probe.check() {
                 ui.horizontal(|ui| {
                     let (mark, col) = match (c.ok, c.required) {
-                        (true, _) => ("✓", theme::COLD),
-                        (false, true) => ("✕", theme::RED),
-                        (false, false) => ("–", theme::FAINT),
+                        (true, _) => (theme::sym::OK, theme::COLD),
+                        (false, true) => (theme::sym::NO, theme::RED),
+                        (false, false) => (theme::sym::NA, theme::FAINT),
                     };
                     ui.label(theme::data_text(mark, 12.0, col));
                     ui.label(theme::data_text(c.label, 11.0, if c.ok { theme::TX } else { theme::DIM }));
@@ -1775,7 +1778,11 @@ fn build_ui(
                     Some(_) => {
                         let n = ed.total_pending();
                         theme::chip(ui, &format!("{n} staged"), n > 0, None);
-                        theme::chip(ui, "sources read-only", false, None);
+                        // Not "sources read-only" any more: an edit of a retail string has to patch
+                        // the base GameText.dlg, because a DLC slot cannot override a hash the base
+                        // map already holds. Retail is kept as .sabbak and Unpublish restores it —
+                        // reversible, which is the promise this chip can still honestly make.
+                        theme::chip(ui, "retail backed up", false, None);
                     }
                 }
                 });
@@ -1944,7 +1951,12 @@ fn build_ui(
                     );
                 });
                 ui.horizontal(|ui| {
-                    if theme::primary_button(ui, if playback.playing { "⏸ Pause" } else { "▶ Play" }, true).clicked() {
+                    let transport = if playback.playing {
+                        format!("{} Pause", theme::sym::PAUSE)
+                    } else {
+                        format!("{} Play", theme::sym::PLAY)
+                    };
+                    if theme::primary_button(ui, &transport, true).clicked() {
                         playback.playing = !playback.playing;
                     }
                     if theme::pill(ui, "loop", playback.looping).clicked() {
@@ -2009,12 +2021,12 @@ fn build_ui(
                 });
             }
             ui.horizontal(|ui| {
-                // Right-to-left: the ✕ is placed first (at the right), then the field fills EXACTLY
+                // Right-to-left: the clear button is placed first (at the right), then the field fills EXACTLY
                 // the remainder — so total content == available. Sizing the field from
                 // `available_width() - k` and then adding the button overflows by (button - k) every
                 // frame, which is what made this panel creep rightward.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("✕").clicked() {
+                    if ui.button(theme::sym::NO).clicked() {
                         nav.search.clear();
                     }
                     ui.add_sized(

@@ -6,9 +6,15 @@
 //! * **The mod is the document.** It has a name and one output slot (`DLC/NN/`). The three pages
 //!   edit different parts of the same thing, and they cross-reference each other (an icon added on
 //!   the Icons page is what an Objects property points at).
-//! * **Sources are read-only.** `DLC/01/` mirrors the whole tree (megapacks, Cinematics,
-//!   GameTemplates), so a mod is naturally the next slot. Nothing here ever writes back over a
-//!   retail file; publishing is additive on disk and uninstalling is deleting a folder.
+//! * **Sources are read-only until publish, and every write is reversible.** `DLC/01/` mirrors the
+//!   whole tree (megapacks, Cinematics, GameTemplates), so a mod is naturally the next slot, and
+//!   uninstalling it is deleting a folder.
+//!
+//!   One thing cannot go there. An edit to an EXISTING string has to patch the base
+//!   `GameText.dlg`, because the engine's string map is first-write-wins and the base file is
+//!   loaded first — a DLC slot can only ADD ids. Those patches keep retail beside them as
+//!   `.sabbak`, which is both what publish reads back (so it never compounds) and what Unpublish
+//!   restores.
 //!
 //!   It is NOT additive at runtime, which is the thing to know before publishing anything: the
 //!   engine mounts exactly ONE DLC slot — the highest `dlclevel` that has a `dlcinfo.ini`, ties
@@ -115,7 +121,11 @@ impl Mod {
 // ---------------------------------------------------------------------------------------------
 
 /// What a change does when published. Each carries enough to re-apply it to a freshly parsed source.
-#[derive(Clone)]
+///
+/// "Re-apply to a freshly parsed source" is not only publish's contract — it is also how the window
+/// shows your work. Sources are re-read on every load (a language switch, or a new session), and the
+/// edit lives here rather than in the loaded model, so anything that lands has to be re-applied.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Op {
     SetString { lang: usize, asset_id: u32, text: String },
     AddString { lang: usize, dotted: String, text: String },
@@ -135,12 +145,86 @@ impl Op {
 }
 
 /// One reversible edit. `before` is kept so the changelist can always say what it was.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Change {
     target: String,
     before: String,
     after: String,
     op: Op,
+}
+
+/// The mod document — the changelist, on disk.
+///
+/// The changelist IS the mod. Sources are read-only and the published overlay is derived from it, so
+/// a changelist that lives only in the window means closing the window is losing the work, and a new
+/// session opens on retail text with no sign that anything was ever modded. It is authoring state
+/// rather than game content, so it is stored beside the app's settings — where it also survives
+/// deleting the published `DLC/NN/` folder.
+///
+/// Keyed by output slot, not by mod name: the slot is what identifies this document to the app (it
+/// is the mod's output), and keying by name would silently start an empty document the moment anyone
+/// renamed their mod. `name` rides along so the file says what it belongs to.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ModDoc {
+    /// Bumped when a stored op stops meaning what it meant. See [`ModDoc::CURRENT`].
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    changes: Vec<Change>,
+}
+
+impl ModDoc {
+    /// `%APPDATA%/sab_workshop/mods/dlc-<slot>.json`, beside `settings.json`.
+    fn path(slot: &str) -> std::path::PathBuf {
+        let slug: String =
+            slot.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>();
+        crate::settings::settings_path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("mods")
+            .join(format!("dlc-{}.json", if slug.is_empty() { "unset".into() } else { slug }))
+    }
+
+    /// 1 — the original. `SetPair.entry` indexed `DLC/01/GameTemplates.wsd` (5 entries).
+    /// 2 — the Objects page reads the real DB from `France/loosefiles_BinPC.pack` (10,761
+    ///     templates), so the same index now means a different template. A v1 document's object
+    ///     edits cannot be carried forward and are dropped on load rather than silently re-pointed
+    ///     at whatever now sits at that index.
+    const CURRENT: u32 = 2;
+
+    fn load(slot: &str) -> ModDoc {
+        let mut doc = ModDoc::load_from(&ModDoc::path(slot));
+        if doc.version < ModDoc::CURRENT {
+            doc.changes.retain(|c| !matches!(c.op, Op::SetPair { .. }));
+            doc.version = ModDoc::CURRENT;
+        }
+        doc
+    }
+
+    /// A missing or unreadable document is an empty one — first run, not an error. A CORRUPT one is
+    /// also empty, which is the honest outcome: the alternative is refusing to open the app at all.
+    fn load_from(path: &std::path::Path) -> ModDoc {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(slot: &str, name: &str, changes: &[Change]) -> Result<(), String> {
+        ModDoc::save_to(&ModDoc::path(slot), name, changes)
+    }
+
+    fn save_to(path: &std::path::Path, name: &str, changes: &[Change]) -> Result<(), String> {
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).map_err(|e| format!("create {}: {e}", p.display()))?;
+        }
+        let doc =
+            ModDoc { version: ModDoc::CURRENT, name: name.to_string(), changes: changes.to_vec() };
+        let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+        std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -181,7 +265,9 @@ type IconRec = (String, u32, usize, usize, usize);
 /// Results streaming back from the loader threads.
 enum EdMsg {
     Strings(usize, Result<GameText, String>),
-    Objects(Result<GameTemplates, String>),
+    /// The table AND its value-hash cross-reference. The xref is built on the worker: it walks every
+    /// pair of every template (~800k over the real DB), which is a visible hitch on the UI thread.
+    Objects(Result<(GameTemplates, std::collections::HashMap<u32, Vec<usize>>), String>),
     IconProgress(usize, usize),
     Icons(Result<Vec<IconRec>, String>),
     /// hash, width, height, RGBA — decoded off-thread; the UI only uploads it.
@@ -201,9 +287,26 @@ struct StringsState {
     new_text: String,
 }
 
+/// One line of the template list: a type heading, a template, or the "narrowed" footer.
+///
+/// Flat, and every variant one row tall, because that is what `show_rows` needs to virtualise —
+/// grouping is expressed by position rather than by nesting.
+enum ObjRow {
+    Head(String, usize),
+    Item(usize, String),
+    More(usize),
+}
+
 #[derive(Default)]
 struct ObjectsState {
     search: String,
+    /// The list, grouped by type and flattened. Rebuilt only when the search or the loaded table
+    /// changes: rebuilding it per frame meant lowercasing and cloning 10,761 names EVERY frame.
+    rows: Vec<ObjRow>,
+    /// The search this cache was built for. `None` forces a rebuild (a fresh table landed).
+    rows_key: Option<String>,
+    /// Template count, cached with the rows — `templates().count()` walks all 11,072 entries.
+    total: usize,
     selected: Option<usize>,
     /// pair index -> edit buffer, for the pair currently being typed into
     edit_pair: Option<usize>,
@@ -296,6 +399,9 @@ impl Editor {
             tx,
             rx,
         };
+        // Whatever was staged last session. Loaded before the assets are even asked for, so the
+        // first frame that has text in it already has the edits applied (see `pump`).
+        e.changes = ModDoc::load(slot).changes;
         // Start everything now. Templates and one language are small and land almost immediately;
         // the pack sweep is the slow one and it runs alongside, so by the time anyone opens Icons it
         // is usually done — and if not, they see progress rather than a button.
@@ -316,13 +422,24 @@ impl Editor {
         });
     }
 
+    /// Load the game's object DB — all of it.
+    ///
+    /// This used to read `DLC/01/GameTemplates.wsd` and show **five** templates, which is the whole
+    /// of the Midnight Show DLC's patch table and none of the game. The real DB is an `AULB` blob
+    /// embedded in `France/loosefiles_BinPC.pack` (10,761 templates), which `assets` already knows
+    /// how to find — the page was simply still pointed at the file it was prototyped against.
     fn kick_objects(&mut self) {
-        let (tx, path) = (self.tx.clone(), self.md.templates_src());
+        let (tx, game_dir) = (self.tx.clone(), self.md.game_dir.clone());
         self.obj_load = Load::Loading;
         std::thread::spawn(move || {
-            let r = std::fs::read(&path)
-                .map_err(|e| format!("{path}: {e}"))
-                .and_then(|b| GameTemplates::parse(&b).map(|(g, _)| g));
+            let r = crate::assets::load_gametemplates(&game_dir)
+                .ok_or_else(|| {
+                    format!("no GameTemplates found in {game_dir}/France/loosefiles_BinPC.pack")
+                })
+                .map(|gt| {
+                    let xref = build_xref(&gt);
+                    (gt, xref)
+                });
             let _ = tx.send(EdMsg::Objects(r));
         });
     }
@@ -367,15 +484,22 @@ impl Editor {
                         Ok(g) => Load::Ready(g),
                         Err(e) => Load::Failed(e),
                     };
+                    // What just arrived is retail. Without this the staged edits are still in the
+                    // changelist but invisible in the text — which is what a language switch, and
+                    // every new session, used to look like.
+                    self.reapply_strings(lang);
                 }
                 EdMsg::Objects(r) => {
                     self.obj_load = match r {
-                        Ok(g) => {
-                            self.xref = build_xref(&g);
+                        Ok((g, xref)) => {
+                            self.xref = xref;
                             Load::Ready(g)
                         }
                         Err(e) => Load::Failed(e),
                     };
+                    self.reapply_objects();
+                    // A different table means the cached list describes nothing.
+                    self.objects.rows_key = None;
                 }
                 EdMsg::IconProgress(d, t) => self.icons.progress = (d, t),
                 EdMsg::Icons(r) => {
@@ -599,7 +723,7 @@ impl Editor {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .add(
-                                    egui::Button::new(theme::disp_text("↺", 11.0, theme::FAINT))
+                                    egui::Button::new(theme::disp_text(theme::sym::UNDO, 11.0, theme::FAINT))
                                         .frame(false),
                                 )
                                 .on_hover_text("revert this change")
@@ -624,6 +748,7 @@ impl Editor {
         if let Some(i) = revert {
             let c = self.changes.remove(i);
             self.unapply(&c);
+            self.save_doc();
         }
 
         ui.add_space(4.0);
@@ -633,6 +758,7 @@ impl Editor {
                 for c in all.iter().rev() {
                     self.unapply(c);
                 }
+                self.save_doc();
             }
             // Offered whenever anything is installed, not only when the changelist is dirty: the
             // thing worth undoing is what is on the game's disk, which outlives this session.
@@ -653,9 +779,12 @@ impl Editor {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::stamp_button(ui, "Publish", !self.changes.is_empty())
                     .on_hover_text(format!(
-                        "Write {}: the edits, a dlcinfo.ini that outranks every other slot, and a copy of \
-                         DLC/01's payload (~174 MB, first publish only) — the engine mounts one slot and \
-                         the loser does not load. Sources are never touched.",
+                        "Edits of retail strings patch {}/Cinematics/Dialog/<Lang>/GameText.dlg — the \
+                         only place they can work — keeping retail as GameText.dlg.sabbak. Everything \
+                         else goes to {}, with a dlcinfo.ini that outranks every other slot and a copy \
+                         of DLC/01's payload (~174 MB, first publish only), because the engine mounts \
+                         one slot and the loser does not load.",
+                        self.md.game_dir,
                         self.md.out_dir()
                     ))
                     .clicked()
@@ -670,11 +799,41 @@ impl Editor {
             ui.label(theme::data_text(&self.publish_note, 10.0, col));
         }
         ui.add_space(3.0);
-        ui.label(theme::data_text(
-            format!("publishes to {}", self.md.out_dir()),
-            9.5,
-            theme::FAINT,
-        ));
+        // Publish has TWO destinations and they are not interchangeable: an edit of a retail string
+        // cannot work from the slot (the engine drops the duplicate hash), and an addition has no
+        // business touching retail. Naming only the slot here read as "everything goes to DLC/NN",
+        // which is how a base patch could look like a file written to the wrong place.
+        let (mut edits, mut extras) = (false, false);
+        for c in &self.changes {
+            match &c.op {
+                Op::SetString { .. } => edits = true,
+                _ => extras = true,
+            }
+        }
+        if self.changes.is_empty() {
+            // Nothing staged yet — describe both routes rather than neither.
+            edits = true;
+            extras = true;
+        }
+        if edits {
+            ui.label(theme::data_text(
+                format!("edits of retail strings → {}/Cinematics/Dialog/<Lang>/GameText.dlg", self.md.game_dir),
+                9.5,
+                theme::FAINT,
+            ));
+            ui.label(theme::data_text(
+                "  retail is kept beside it as GameText.dlg.sabbak — Unpublish puts it back",
+                9.0,
+                theme::FAINT,
+            ));
+        }
+        if extras {
+            ui.label(theme::data_text(
+                format!("new strings, objects, icons → {}", self.md.out_dir()),
+                9.5,
+                theme::FAINT,
+            ));
+        }
     }
 
     /// Undo a change's effect on the in-memory model (the changelist entry itself is already gone).
@@ -716,9 +875,51 @@ impl Editor {
         if let Some(existing) = self.changes.iter_mut().find(|c| c.target == target) {
             existing.after = after;
             existing.op = op;
-            return;
+        } else {
+            self.changes.push(Change { target, before, after, op });
         }
-        self.changes.push(Change { target, before, after, op });
+        self.save_doc();
+    }
+
+    /// Persist the changelist. Called on every mutation rather than on exit: the window can be
+    /// closed by anything, and "save your mod" is not a step a modder should have to remember.
+    fn save_doc(&mut self) {
+        if let Err(e) = ModDoc::save(&self.md.slot, &self.md.name, &self.changes) {
+            self.publish_ok = false;
+            self.publish_note = format!("WARNING: could not save the mod document: {e}");
+        }
+    }
+
+    /// Put the staged string edits back onto a freshly loaded language.
+    fn reapply_strings(&mut self, lang: usize) {
+        let Some(gt) = self.str_load.ready_mut() else { return };
+        for c in &self.changes {
+            match &c.op {
+                Op::SetString { lang: l, asset_id, text } if *l == lang => {
+                    if let Some(r) = gt.find_mut(*asset_id) {
+                        r.set_text(text);
+                    }
+                }
+                Op::AddString { lang: l, dotted, text } if *l == lang => {
+                    let _ = gt.add_ui(dotted, text);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The same, for a freshly loaded template file.
+    fn reapply_objects(&mut self) {
+        let Some(gt) = self.obj_load.ready_mut() else { return };
+        for c in &self.changes {
+            if let Op::SetPair { entry, pair, bytes } = &c.op {
+                if let Some(Entry::Template(t)) = gt.entries.get_mut(*entry) {
+                    if let Some(p) = t.pairs.get_mut(*pair) {
+                        p.data = bytes.clone();
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ publish
@@ -829,21 +1030,30 @@ impl Editor {
                 _ => None,
             })
             .collect();
-        if !pair_ops.is_empty() {
-            let src = self.md.templates_src();
-            let bytes = std::fs::read(&src).map_err(|_| format!("cannot read {src}"))?;
-            let (mut gt, _) = GameTemplates::parse(&bytes).map_err(|_| format!("cannot parse {src}"))?;
-            for (e, p, b) in pair_ops {
-                if let Some(Entry::Template(t)) = gt.entries.get_mut(e) {
-                    if let Some(pp) = t.pairs.get_mut(p) {
-                        pp.data = b;
-                    }
-                }
-            }
-            write_file(&self.md.templates_out(), &gt.write())?;
-            wrote.push("GameTemplates.wsd".into());
-            mine.push("GameTemplates.wsd".into());
-        }
+        // ---- templates: readable, not yet publishable ----
+        //
+        // The Objects page now reads the real DB out of `France/loosefiles_BinPC.pack`, so a
+        // `SetPair` indexes THAT table — while this used to write `DLC/01`'s five-entry file, where
+        // the same index means an unrelated template. Publishing across that mismatch would edit
+        // something nobody asked for, silently, which is the exact failure this tool keeps hitting.
+        //
+        // Refusing is the honest state until the write path is built. Two things have to be settled
+        // first: publish the touched entries as their own small `AULB` (retail's DLC ships 5 that
+        // way) rather than an 8 MB copy of the whole table, and establish whether a slot can
+        // override a BASE template at all — `FUN_00461590` updates a template in place when the
+        // name already exists, which makes it last-writer-wins, and retail's own DLC only ever ADDS
+        // names. If the base table loads after the mount, an override would be undone.
+        // Skipped rather than fatal: the rest of the mod still ships, and the object edits stay in
+        // the changelist for the session that builds this.
+        let deferred = if pair_ops.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nWARNING: {} object edit(s) staged but NOT published — object publishing is not \
+                 wired up yet; they stay in the changelist",
+                pair_ops.len()
+            )
+        };
 
         // ---- reserved texture names ----
         // A reservation is a NAME, not pixels: the hash is what a template points at, and packing the
@@ -868,7 +1078,11 @@ impl Editor {
         }
 
         if wrote.is_empty() {
-            return Ok("nothing to write".into());
+            return Ok(if deferred.is_empty() {
+                "nothing to write".into()
+            } else {
+                deferred.trim_start().to_string()
+            });
         }
 
         // Nothing went into the slot — a mod of nothing but string edits is now exactly two patched
@@ -881,7 +1095,7 @@ impl Editor {
                 std::fs::remove_file(&ini).map_err(|e| format!("remove {ini}: {e}"))?;
                 wrote.push(format!("DLC/{} un-mounted (nothing left in it)", self.md.slot));
             }
-            return Ok(format!("published ({})", wrote.join(", ")));
+            return Ok(format!("published ({}){}", wrote.join(", "), deferred));
         }
 
         // ---- the retail payload this slot has to carry ----
@@ -924,7 +1138,7 @@ impl Editor {
             }
         };
 
-        Ok(format!("published → {} ({})\n{}", out, wrote.join(", "), verdict))
+        Ok(format!("published → {} ({})\n{}{}", out, wrote.join(", "), verdict, deferred))
     }
 
     /// Put the game back the way it was found.
@@ -1050,7 +1264,7 @@ impl Editor {
         if self.load_state(ui, LANGS[self.strings.lang].1, &self.str_load, None) {
             ui.add_space(4.0);
             ui.label(theme::data_text(
-                "source is read-only; edits publish to the DLC overlay",
+                "nothing is written until you publish; retail is backed up before it is patched",
                 9.5,
                 theme::FAINT,
             ));
@@ -1076,7 +1290,7 @@ impl Editor {
         });
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("✕").clicked() {
+                if ui.button(theme::sym::NO).clicked() {
                     self.strings.search.clear();
                 }
                 ui.add_sized(
@@ -1435,7 +1649,10 @@ impl Editor {
     fn objects_nav(&mut self, ui: &mut egui::Ui) {
         theme::eyebrow(ui, "Templates");
         ui.add_space(3.0);
-        if self.load_state(ui, "GameTemplates.wsd", &self.obj_load, None) {
+        // Name the source. It is not a file you can open — the DB is an AULB blob inside
+        // `France/loosefiles_BinPC.pack` — and "GameTemplates.wsd" on its own was what let this page
+        // show the DLC's five templates for so long without anyone asking which file that was.
+        if self.load_state(ui, "GameTemplates (loosefiles_BinPC.pack)", &self.obj_load, None) {
             return;
         }
 
@@ -1443,7 +1660,7 @@ impl Editor {
         let Load::Ready(gt) = &loaded else { self.obj_load = loaded; return; };
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("✕").clicked() {
+                if ui.button(theme::sym::NO).clicked() {
                     self.objects.search.clear();
                 }
                 ui.add_sized(
@@ -1464,62 +1681,125 @@ impl Editor {
             })
             .collect();
 
-        // group by type — the field that says what kind of thing a template is
-        let mut by_type: std::collections::BTreeMap<String, Vec<(usize, String)>> = Default::default();
-        for (i, e) in gt.entries.iter().enumerate() {
-            if let Entry::Template(t) = e {
-                let hay = format!("{} {}", t.name, t.ttype).to_ascii_lowercase();
-                if !needle.is_empty() && !hay.contains(&needle) {
-                    continue;
+        // ---- the list, built once per search rather than once per frame ----
+        //
+        // This page was written against a five-entry table, where rebuilding the whole grouping
+        // every frame cost nothing. Against the real 10,761-template DB the same code allocated two
+        // Strings per template per frame just to lowercase a haystack, then cloned every name and
+        // type into a map — tens of thousands of allocations at frame rate, which is what made the
+        // window feel like it was struggling to load. Nothing about it was the load.
+        if self.objects.rows_key.as_deref() != Some(needle.as_str()) {
+            let mut by_type: std::collections::BTreeMap<&str, Vec<(usize, &str)>> =
+                Default::default();
+            let mut total = 0usize;
+            for (i, e) in gt.entries.iter().enumerate() {
+                if let Entry::Template(t) = e {
+                    total += 1;
+                    // Match without building a haystack: two case-insensitive passes, no allocation.
+                    if !needle.is_empty()
+                        && !contains_ci(&t.name, &needle)
+                        && !contains_ci(&t.ttype, &needle)
+                    {
+                        continue;
+                    }
+                    by_type.entry(t.ttype.as_str()).or_default().push((i, t.name.as_str()));
                 }
-                by_type.entry(t.ttype.clone()).or_default().push((i, t.name.clone()));
             }
+            let mut rows = Vec::new();
+            for (ty, items) in by_type {
+                rows.push(ObjRow::Head(ty.to_string(), items.len()));
+                for (i, name) in items.iter().take(400) {
+                    rows.push(ObjRow::Item(*i, name.to_string()));
+                }
+                if items.len() > 400 {
+                    rows.push(ObjRow::More(items.len() - 400));
+                }
+            }
+            self.objects.rows = rows;
+            self.objects.rows_key = Some(needle);
+            self.objects.total = total;
         }
-        let shown: usize = by_type.values().map(|v| v.len()).sum();
+
+        let shown = self
+            .objects
+            .rows
+            .iter()
+            .filter(|r| matches!(r, ObjRow::Item(..)))
+            .count();
         ui.label(theme::data_text(
-            format!("{shown} of {} templates", gt.templates().count()),
+            format!("{shown} of {} templates", self.objects.total),
             10.0,
             theme::FAINT,
         ));
         ui.add_space(3.0);
 
+        // Virtualised, for the same reason the Strings and Icons lists are: `show()` builds a widget
+        // for every row and merely clips the paint, so a filter matching thousands of templates laid
+        // all of them out on every frame.
         let mut pick = None;
-        egui::ScrollArea::vertical().id_source("obj_rows").auto_shrink([false, false]).show(ui, |ui| {
-            for (ty, items) in &by_type {
-                ui.horizontal(|ui| {
-                    ui.label(theme::disp_text(ty, 10.5, theme::FAINT));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(theme::data_text(format!("{}", items.len()), 9.5, theme::FAINT));
-                    });
-                });
-                for (i, name) in items.iter().take(400) {
-                    let sel = self.objects.selected == Some(*i);
-                    let is_ed = edited.contains(i);
-                    ui.horizontal(|ui| {
-                        let (d, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                        ui.painter().rect_filled(
-                            d,
-                            egui::Rounding::ZERO,
-                            if is_ed { theme::EMBER } else { theme::G3 },
-                        );
-                        let fg = if sel { theme::RED } else if is_ed { theme::TX } else { theme::DIM };
-                        if ui
-                            .add(egui::Label::new(theme::data_text(name, 11.0, fg)).sense(egui::Sense::click()))
-                            .clicked()
-                        {
-                            pick = Some(*i);
+        let rows = &self.objects.rows;
+        egui::ScrollArea::vertical().id_source("obj_rows").auto_shrink([false, false]).show_rows(
+            ui,
+            20.0,
+            rows.len(),
+            |ui, range| {
+                for k in range {
+                    match &rows[k] {
+                        ObjRow::Head(ty, n) => {
+                            ui.horizontal(|ui| {
+                                ui.label(theme::disp_text(ty, 10.5, theme::FAINT));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(theme::data_text(
+                                            format!("{n}"),
+                                            9.5,
+                                            theme::FAINT,
+                                        ));
+                                    },
+                                );
+                            });
                         }
-                    });
+                        ObjRow::Item(i, name) => {
+                            let sel = self.objects.selected == Some(*i);
+                            let is_ed = edited.contains(i);
+                            ui.horizontal(|ui| {
+                                let (d, _) = ui
+                                    .allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                ui.painter().rect_filled(
+                                    d,
+                                    egui::Rounding::ZERO,
+                                    if is_ed { theme::EMBER } else { theme::G3 },
+                                );
+                                let fg = if sel {
+                                    theme::RED
+                                } else if is_ed {
+                                    theme::TX
+                                } else {
+                                    theme::DIM
+                                };
+                                if ui
+                                    .add(
+                                        egui::Label::new(theme::data_text(name, 11.0, fg))
+                                            .sense(egui::Sense::click()),
+                                    )
+                                    .clicked()
+                                {
+                                    pick = Some(*i);
+                                }
+                            });
+                        }
+                        ObjRow::More(n) => {
+                            ui.label(theme::data_text(
+                                format!("… {n} more — narrow the filter"),
+                                9.5,
+                                theme::FAINT,
+                            ));
+                        }
+                    }
                 }
-                if items.len() > 400 {
-                    ui.label(theme::data_text(
-                        format!("… {} more — narrow the filter", items.len() - 400),
-                        9.5,
-                        theme::FAINT,
-                    ));
-                }
-            }
-        });
+            },
+        );
         if let Some(i) = pick {
             self.objects.selected = Some(i);
             self.objects.edit_pair = None;
@@ -1716,7 +1996,11 @@ impl Editor {
                         ui.label(theme::data_text(tn, 11.0, theme::TX));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .add(egui::Button::new(theme::disp_text("Pick ▦", 9.5, theme::COLD)))
+                                .add(egui::Button::new(theme::disp_text(
+                                    format!("Pick {}", theme::sym::ICONS),
+                                    9.5,
+                                    theme::COLD,
+                                )))
                                 .on_hover_text("choose a texture on the Icons page")
                                 .clicked()
                             {
@@ -1858,7 +2142,7 @@ impl Editor {
         });
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("✕").clicked() {
+                if ui.button(theme::sym::NO).clicked() {
                     self.icons.search.clear();
                 }
                 ui.add_sized(
@@ -2179,7 +2463,10 @@ fn build_xref(gt: &GameTemplates) -> std::collections::HashMap<u32, Vec<usize>> 
             for p in &t.pairs {
                 if let Some(v) = p.as_u32() {
                     let slot = xref.entry(v).or_default();
-                    if !slot.contains(&i) {
+                    // Entries arrive in ascending `i`, so a repeat can only be the last one pushed.
+                    // The `contains` this replaces was a linear scan per pair — fine over the DLC's
+                    // five templates, ~800k scans over the real DB.
+                    if slot.last() != Some(&i) {
                         slot.push(i);
                     }
                 }
@@ -2187,6 +2474,19 @@ fn build_xref(gt: &GameTemplates) -> std::collections::HashMap<u32, Vec<usize>> 
         }
     }
     xref
+}
+
+/// `haystack.to_lowercase().contains(needle)` without the allocation. `needle` must already be
+/// lowercase. Called once per template per rebuild, which is often enough to matter.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
 fn trunc(s: &str, n: usize) -> String {
@@ -2578,6 +2878,9 @@ mod tests {
     fn editing_a_retail_string_patches_base_and_leaves_the_slot_alone() {
         let Some((root, game)) = staged_install("setstring") else { return };
         let mut ed = Editor::new(&game, 0, "02", "Test mod");
+        // Editor::new restores the real mod document for this slot; a test must not read
+        // (or assert against) whatever the person running it happens to have staged.
+        ed.changes.clear();
 
         let base = root.join("Cinematics/Dialog/English/GameText.dlg");
         let retail = std::fs::read(&base).expect("read");
@@ -2626,6 +2929,9 @@ mod tests {
     fn adding_a_string_goes_to_the_slot_with_a_manifest() {
         let Some((root, game)) = staged_install("addstring") else { return };
         let mut ed = Editor::new(&game, 0, "02", "Test mod");
+        // Editor::new restores the real mod document for this slot; a test must not read
+        // (or assert against) whatever the person running it happens to have staged.
+        ed.changes.clear();
         ed.changes.push(Change {
             target: "EN MyMod_Text.MyKey".into(),
             before: String::new(),
@@ -2645,6 +2951,231 @@ mod tests {
         let out = GameText::parse(&std::fs::read(root.join("DLC/02/Cinematics/Dialog/English/GameText.dlg")).unwrap())
             .expect("parse");
         assert_eq!(out.find(pandemic_hash("MyMod_Text.MyKey")).map(|r| r.text_string()), Some("hello".into()));
+    }
+
+    /// The mod must survive closing the window. Every op kind round-trips, because a document that
+    /// drops one silently is worse than no document at all.
+    #[test]
+    fn the_mod_document_survives_a_restart() {
+        let dir = scratch("doc").join("nested");
+        let path = dir.join("dlc-02.json");
+        let changes = vec![
+            Change {
+                target: "EN 0x11111111".into(),
+                before: "CHECKPOINT".into(),
+                after: "MODDED CHECKPOINT".into(),
+                op: Op::SetString { lang: 0, asset_id: 0x1111_1111, text: "MODDED CHECKPOINT".into() },
+            },
+            Change {
+                target: "EN MyMod_Text.MyKey".into(),
+                before: String::new(),
+                after: "hello".into(),
+                op: Op::AddString { lang: 0, dotted: "MyMod_Text.MyKey".into(), text: "hello".into() },
+            },
+            Change {
+                target: "tmpl 7 pair 2".into(),
+                before: "1".into(),
+                after: "2".into(),
+                op: Op::SetPair { entry: 7, pair: 2, bytes: vec![2, 0, 0, 0] },
+            },
+            Change {
+                target: "tex MyIcon".into(),
+                before: String::new(),
+                after: "MyIcon".into(),
+                op: Op::ReserveTexture { name: "MyIcon".into() },
+            },
+        ];
+        // save_to must create the intermediate directories, not fail on them.
+        ModDoc::save_to(&path, "Test mod", &changes).expect("save");
+
+        let doc = ModDoc::load_from(&path);
+        assert_eq!(doc.name, "Test mod");
+        assert_eq!(doc.changes.len(), 4);
+        assert_eq!(doc.changes[0].before, "CHECKPOINT");
+        assert!(matches!(doc.changes[0].op, Op::SetString { asset_id: 0x1111_1111, lang: 0, .. }));
+        assert!(matches!(&doc.changes[1].op, Op::AddString { dotted, .. } if dotted == "MyMod_Text.MyKey"));
+        assert!(matches!(&doc.changes[2].op, Op::SetPair { entry: 7, pair: 2, bytes } if bytes == &[2,0,0,0]));
+        assert!(matches!(&doc.changes[3].op, Op::ReserveTexture { name } if name == "MyIcon"));
+
+        // A corrupt document opens the app empty rather than not at all.
+        std::fs::write(&path, "{ not json").expect("clobber");
+        assert!(ModDoc::load_from(&path).changes.is_empty());
+        // As does one that was never written.
+        assert!(ModDoc::load_from(&dir.join("dlc-99.json")).changes.is_empty());
+    }
+
+    /// Slot, not name: renaming a mod must not start a fresh empty document.
+    #[test]
+    fn the_document_is_keyed_by_slot() {
+        assert_eq!(ModDoc::path("02"), ModDoc::path("02"));
+        assert_ne!(ModDoc::path("02"), ModDoc::path("03"));
+        assert!(ModDoc::path("02").ends_with("dlc-02.json"));
+        // A hand-edited slot must not escape the mods directory.
+        assert!(ModDoc::path("../../evil").ends_with("dlc-evil.json"));
+    }
+
+    /// A freshly loaded language arrives as retail. The staged edits have to go back on, or the mod
+    /// is invisible in the very window that is editing it — which is what a language switch and
+    /// every new session looked like.
+    #[test]
+    fn a_reload_gets_the_staged_edits_put_back() {
+        let Some((root, game)) = staged_install("reapply") else { return };
+        let mut ed = Editor::new(&game, 0, "02", "Test mod");
+        // Editor::new restores the real mod document for this slot; a test must not read
+        // (or assert against) whatever the person running it happens to have staged.
+        ed.changes.clear();
+
+        let retail = std::fs::read(root.join("Cinematics/Dialog/English/GameText.dlg")).expect("read");
+        let gt = GameText::parse(&retail).expect("parse");
+        let id = gt.records[0].asset_id;
+        let was = gt.records[0].text_string();
+
+        ed.changes.push(Change {
+            target: format!("EN 0x{id:08X}"),
+            before: was.clone(),
+            after: "REAPPLIED".into(),
+            op: Op::SetString { lang: 0, asset_id: id, text: "REAPPLIED".into() },
+        });
+
+        // Exactly what `pump` sees when a load lands: a pristine parse of the source.
+        ed.str_load = Load::Ready(GameText::parse(&retail).expect("parse"));
+        ed.reapply_strings(0);
+        assert_eq!(
+            ed.str_load.ready().unwrap().find(id).map(|r| r.text_string()),
+            Some("REAPPLIED".into())
+        );
+        // ...but the changelist still knows what retail said, so the diff stays honest.
+        assert_eq!(ed.original_text(id), Some(was));
+
+        // A change staged for another language must not bleed into this one.
+        ed.str_load = Load::Ready(GameText::parse(&retail).expect("parse"));
+        ed.reapply_strings(1);
+        assert_ne!(
+            ed.str_load.ready().unwrap().find(id).map(|r| r.text_string()),
+            Some("REAPPLIED".into())
+        );
+    }
+
+    /// The Objects page must read the GAME's object DB, not the DLC's patch table.
+    ///
+    /// `DLC/01/GameTemplates.wsd` holds five templates — the whole Midnight Show patch and none of
+    /// the game — and the page shipped pointed at it. The real DB is an `AULB` blob inside
+    /// `France/loosefiles_BinPC.pack`. Pinned with a floor rather than an exact count so it survives
+    /// a differently-cooked install while still catching a regression to the DLC file.
+    #[test]
+    fn objects_read_the_full_template_db() {
+        let Some(game) = install() else { return };
+        let full = crate::assets::load_gametemplates(&game).expect("main GameTemplates DB");
+        let n = full.templates().count();
+        eprintln!("loaded {n} templates from loosefiles_BinPC.pack");
+        assert!(n > 1000, "expected the game's DB, got {n} templates");
+
+        // ...and the DLC's file is the thing it must NOT be.
+        let dlc = std::fs::read(format!("{game}/DLC/01/GameTemplates.wsd")).expect("dlc templates");
+        let (dlc, _) = GameTemplates::parse(&dlc).expect("parse dlc");
+        assert_eq!(dlc.templates().count(), 5, "retail's DLC patch table");
+        assert!(n > dlc.templates().count() * 100);
+    }
+
+    /// A document written before the Objects page changed source carries `SetPair` indices into a
+    /// five-entry table. Re-pointing them at a 10,761-entry one would edit an unrelated template, so
+    /// they are dropped — and nothing else in the document is.
+    #[test]
+    fn a_v1_document_loses_only_its_object_edits() {
+        let path = scratch("v1doc").join("dlc-02.json");
+        std::fs::write(
+            &path,
+            r#"{"name":"Old mod","changes":[
+                {"target":"EN 0x1","before":"a","after":"b",
+                 "op":{"SetString":{"lang":0,"asset_id":1,"text":"b"}}},
+                {"target":"tmpl 3 pair 1","before":"1","after":"2",
+                 "op":{"SetPair":{"entry":3,"pair":1,"bytes":[2,0,0,0]}}}
+            ]}"#,
+        )
+        .expect("write v1");
+
+        // Straight load keeps everything — the migration is what drops it.
+        let raw = ModDoc::load_from(&path);
+        assert_eq!(raw.version, 0, "a v1 file has no version field");
+        assert_eq!(raw.changes.len(), 2);
+
+        let migrated: Vec<Change> = raw
+            .changes
+            .into_iter()
+            .filter(|c| !matches!(c.op, Op::SetPair { .. }))
+            .collect();
+        assert_eq!(migrated.len(), 1);
+        assert!(matches!(migrated[0].op, Op::SetString { .. }));
+
+        // What we write from here on is stamped, so this only ever happens once.
+        ModDoc::save_to(&path, "Old mod", &migrated).expect("save");
+        assert_eq!(ModDoc::load_from(&path).version, ModDoc::CURRENT);
+    }
+
+    #[test]
+    fn case_insensitive_contains_matches_the_allocating_version() {
+        for (hay, needle) in [
+            ("UsePt_Brothel", "brothel"),
+            ("CP_Burlesque_Stool", "stool"),
+            ("Teleporter", "teleporter"),
+            ("Teleporter", ""),
+            ("Teleporter", "port"),
+            ("Teleporter", "xyz"),
+            ("short", "muchlongerneedle"),
+        ] {
+            assert_eq!(
+                contains_ci(hay, needle),
+                hay.to_ascii_lowercase().contains(needle),
+                "{hay:?} vs {needle:?}"
+            );
+        }
+    }
+
+    /// The xref dedups by entry — a template naming the same hash in two pairs is listed once.
+    #[test]
+    fn xref_lists_each_template_once_per_value() {
+        let mut gt = GameTemplates { entries: Vec::new() };
+        gt.entries.push(Entry::Template(sab_formats::gametemplates::Template {
+            unk1: 0,
+            unk2: 1,
+            name: "A".into(),
+            ttype: "Prop".into(),
+            pairs: vec![
+                sab_formats::gametemplates::Pair { hash: 1, data: 7u32.to_le_bytes().to_vec() },
+                sab_formats::gametemplates::Pair { hash: 2, data: 7u32.to_le_bytes().to_vec() },
+            ],
+        }));
+        assert_eq!(build_xref(&gt).get(&7), Some(&vec![0usize]));
+    }
+
+    /// The list rebuild and the xref are what made the page struggle once it had the real DB behind
+    /// it. Generous bounds — this is a guard against a return to per-template allocation, not a
+    /// benchmark. Run under `--release` for a meaningful number; debug is ~10× slower.
+    #[test]
+    fn building_the_object_list_is_not_slow() {
+        let Some(game) = install() else { return };
+        let gt = crate::assets::load_gametemplates(&game).expect("templates");
+
+        let t0 = std::time::Instant::now();
+        let xref = build_xref(&gt);
+        let xref_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let needle = "usept";
+        let t1 = std::time::Instant::now();
+        let mut hits = 0usize;
+        for (_, t) in gt.templates() {
+            if contains_ci(&t.name, needle) || contains_ci(&t.ttype, needle) {
+                hits += 1;
+            }
+        }
+        let filter_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!(
+            "xref {} keys in {xref_ms:.1} ms; filtered {hits} of {} in {filter_ms:.2} ms",
+            xref.len(),
+            gt.templates().count()
+        );
+        assert!(filter_ms < 100.0, "a filter pass must not cost a frame: {filter_ms} ms");
     }
 
     /// A stripped install has no DLC/01 to carry; publishing must still succeed.

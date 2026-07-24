@@ -1564,6 +1564,7 @@ dependencies = [
  "sab_formats",
  "serde",
  "serde_json",
+ "ttf-parser",
  "wgpu",
  "winit",
 ]
