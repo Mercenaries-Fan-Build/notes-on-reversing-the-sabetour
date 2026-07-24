@@ -97,7 +97,7 @@ that [06](06-lua-side-wrapper-layer.md) documents depends on a binding no family
 > argument intact. The **`Sabotage` next-step below was executed and it settled the question**:
 > `SabotagePtOnSet` @ `0x00740f70` *does* store a callback name via `FUN_0070a180` — arg 2 is gated
 > non-empty (`cmp byte [ebx],0`) and pushed as the name, with an optional self table via `0x70a4b0` —
-> the same registrar `Actor.SetDeathCallback` @ `0x00762da0` uses. So **hypothesis (b) is wrong: the
+> the same registrar `Vehicle.SetDeathCallback` @ `0x00762da0` uses. So **hypothesis (b) is wrong: the
 > `Sabotage` table is a live C→Lua surface**, registered and callable, that the shipped corpus simply
 > never uses. Its 0 call sites are a fact about the shipped scripts, not about the engine.
 
@@ -496,7 +496,20 @@ lands on the weakest spot: an `inlined` thunk has no separate adapter to read `m
 presumably exactly why the dumper left them blank. So the 15 rows where the "always 1" rule is
 *least* directly observable are the 15 the doc's own tool declined to call. **Fix:** either disassemble
 the 17 and fill the column, or have [00 §8.1](00-seam-overview.md) say "722 by shape-rule, of which 707
-are directly observed and 15 inferred from the rule". **No doc in the series mentions the blank column.**
+are directly observed and 15 inferred from the rule". ⚠️ *(corrected 2026-07-24)* — this bullet used to end
+"**No doc in the series mentions the blank column.**" That is false, and was already false when written:
+**three docs note it in passing, and between them have directly filled 5 of the 17 —** none, however,
+enumerates the full set, which is what makes the column still worth a sweep.
+
+| Doc | Rows it names | Verdict recorded |
+|---|---|---|
+| [23 §UV-scrolling](23-family-render-weather-fx.md) | `Render.ResumeUVScrolling`, `Render.ClearGlobalWTF`, `Render.WTFExitActivePortal` | "the body plainly ends `mov eax,1; ret`. The blank is a dumper artifact" |
+| [19](19-family-ui-hud-tutorial.md) (footnote †) | `HUD.FlashRestrictedAreas` | "the body nonetheless sets `eax=1` on every path … a tsv extraction artifact, not a different contract" |
+| [17](17-family-sound-voice-conversation.md) | `Sound.EnableAllChatter` | disassembled 2026-07-24: `mov eax,1` before the flag store |
+
+All five re-verified against retail here (`0x0073ff10`, `0x007400f0`, `0x0073ff80`, `0x007314d0`,
+`0x00744e40`) — every one ends `mov eax, 1; ret`, so the shape-rule holds on every row anyone has actually
+looked at, 5 for 5. **12 remain unread.**
 
 ### 4.6 Superseded rows still readable as fact
 
@@ -541,11 +554,11 @@ dead code, which is itself the answer to the DLC question and retires §3.2.
 
 | # | Item | Cost | Retires |
 |---|---|---|---|
-| 1 | Patch the three stale lines in [`formats/lua_scripts.md`](../formats/lua_scripts.md) (§3.7) | 10 min, no analysis | The only actively-misleading contradiction |
+| 1 | ~~Patch the three stale lines in [`formats/lua_scripts.md`](../formats/lua_scripts.md) (§3.7)~~ | ~~10 min, no analysis~~ | ~~The only actively-misleading contradiction~~ — **done ✅** *(this row was stale: §3.7 has read "now propagated ✅" and §4.1 "RESOLVED ✅" since 2026-07-16. Re-verified 2026-07-24 — `lua_scripts.md` line 37 now reads "**[Solved — see below]**" and cites "a red-black tree find", line 69 is a `## ✅ Solved:` heading, line 128 reads "✅ **solved**". Nothing left to patch)* |
 | 2 | Hash `"d:\Scripts\DLC_InteriorManager.luac"` against `LuaScripts.luap` (§3.2) | 5 min, script only | The DLC plaintext question |
 | 3 | Read `FUN_00706670` @ `0x00706670` to the end (§3.6) | 30 min, static | [04 Q2](04-vm-lifecycle-and-script-objects.md#open-questions) + the `LuaMissions` slot-1 hypothesis |
 | 4 | Disassemble `0x006f8a90`'s `mov ecx` (§4.4) | 5 min, capstone | Makes [00 §7.1](00-seam-overview.md) honestly *confirmed* |
-| 5 | Fill the 17 blank `nresults` (§4.5) | 1 hr, capstone | The last hole in the return contract |
+| 5 | Fill the 17 blank `nresults` (§4.5) — **5/17 done, 12 left** *(updated 2026-07-24; see the table in §4.5)* | ~40 min, capstone | The last hole in the return contract |
 | 6 | `tools/check_seam_coverage.py` in CI (§2) | 1 hr | The entire class of gap this doc found — **still open, and now the successor to item 7** |
 | 7 | ~~Write `22-family-…-points.md` (§1.1) and `23-family-render-weather-fx.md` (§1.2)~~ | ~~2 docs~~ | ~~The 86 orphans~~ — **done 2026-07-16 ✅** (both written, both verified; plus the `Sensory`/`Damage`/`Freeplay` adoptions into 11/16/20) |
 

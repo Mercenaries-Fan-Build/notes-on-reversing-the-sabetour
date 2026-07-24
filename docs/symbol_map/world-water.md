@@ -2,7 +2,7 @@
 
 The world/streaming layer of the WildStar/Odin engine: it loads the playable map and its per-region data files, runs the water simulation and reflection rendering, generates far-scene terrain, manages interior teleporting, and constructs/animates the props and generic world-objects the game is populated with. Build tree root for all of these is `wildstar\POV\code\WildStar\Objects\` and `...\Managers\`.
 
-Confidence: **medium**. The data-file loaders, render passes, interior manager, and prop classes are pinned by hard `.cpp` source-path/`sprintf` string anchors. The locomotion grapple/climb classes and the Lua-binding native handlers are **not** pinned (see Gaps) because there is no RTTI vtable->VA map yet and binding names are not inline strings.
+Confidence: **medium**. The data-file loaders, render passes, interior manager, and prop classes are pinned by hard `.cpp` source-path/`sprintf` string anchors. The locomotion grapple/climb classes and the Lua-binding native handlers are **not** pinned (see Gaps) because binding names are not inline strings and this doc predates the RTTI vtable→VA map ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)) and the binding map ([`lua_registration_map.tsv`](../../data/lua_registration_map.tsv)), both of which now exist.
 
 ## World / level loading
 
@@ -55,7 +55,7 @@ Interior: `SpawnInterior`, `AddInterior`, `EnterInterior`, `ExitInterior`, `Unlo
 
 ## Gaps
 
-- **No RTTI vtable->VA map**, so class-to-ctor bindings for `WSWater`, `WSWaterPhysics(Manager)`, `WSTerrainChunk`, `WSDynamicProp`, `WSAnimatedProp`, `WSAIProp` are not pinned beyond the loaders/factory above.
+- Class-to-ctor bindings for `WSWater`, `WSWaterPhysics(Manager)`, `WSTerrainChunk`, `WSDynamicProp`, `WSAnimatedProp`, `WSAIProp` are not pinned beyond the loaders/factory above — ✅ the RTTI vtable→VA map ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)) now exists and would resolve them; not yet applied.
 - **Grapple/climb locomotion** (`WSGrapple`, `WSHumanStateClimb`, `WSHumanStateGrapple`, `WSHavokStateClimbing`) has no surviving anchors — needs the vtable map.
 - **Lua binding native handlers** (`SetWaterLevel`, `IsRagdollInWater`, `SpawnObject`, `EnterInterior`, `SetInteriorFloorData`, …) are unresolved: binding names are not inline strings and the registration table was not located.
 - **Water/ragdoll physics** (`WSRagdollWaterFlagRemover`, `WSWaterPhysics`) behind `IsRagdollInWater`/`RegisterWaterLoggedCallback` not located.

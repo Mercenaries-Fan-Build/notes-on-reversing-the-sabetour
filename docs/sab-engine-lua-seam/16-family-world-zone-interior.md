@@ -519,9 +519,15 @@ stores `false`, and no caller can distinguish "not loaded" from "you passed me a
     `Train.TrainIsStreamedIn`'s argument type is unknown — it resolves through a train-specific
     `0x0061df50` rather than a standard `FUN_006f7*` primitive. Both belong to the train family; flagged
     here so the omission is not silent.
-11. **The decomp export is missing ~1,100 functions**, including contiguous runs (`0x00754000`–
-    `0x00757900`, `0x007518f8`–`0x00751cc0`, `0x0075b83d`–`0x0075c700`). This is worth fixing at the
-    source: 16 of this family's 55 bindings fall in holes and 14 needed direct disassembly from
+11. **The decomp export has three contiguous holes**: `0x00754000`–`0x00757900`, `0x007518f8`–
+    `0x00751cc0`, `0x0075b83d`–`0x0075c700`. Verified: **zero `==== … @0xVA` headers fall inside any of
+    the three**. ⚠️ *(corrected 2026-07-24: an earlier revision of this note claimed the export was
+    "missing ~1,100 functions". That number was bogus — it came from `36,935` total headers minus
+    `35,819` `FUN_`-prefixed headers. Those `1,116` entries are **present**; they simply carry
+    demangled or synthetic Ghidra names instead of the `FUN_` prefix — `caseD_8`, `default`,
+    `~GAcquireInterface`, `` `default_constructor_closure' ``, `FID_conflict:operator==`,
+    `CreateObject`, and so on. Only the three named holes are real gaps.)* The holes are worth fixing
+    at the source: 16 of this family's 55 bindings fall in them and 14 needed direct disassembly from
     `Saboteur.exe` to recover, and
     other families are certainly hitting the same holes without noticing — a missing function looks
     exactly like a binding with no body.

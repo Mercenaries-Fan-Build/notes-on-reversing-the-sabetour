@@ -10,7 +10,7 @@ governs how NPCs react to the player's cover.
 
 Confidence is **high** for everything pinned below: nearly every function carries a
 retail assert string of the form `WSHuman.cpp` + `"WSClass::Method"` + a line number,
-or reads a named config key. The main gap is that without an RTTI vtable→VA map the
+or reads a named config key. ✅ The RTTI vtable→VA map now exists ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv); e.g. `WSHumanStateDisguise` 21 slots) — this doc predates it, so the main gap below is that the
 per-state class vtables and the `WSHumanStateDisguise` state class itself cannot be
 tied to addresses (see Gaps).
 
@@ -99,7 +99,7 @@ detection radius depend on what the disguised player is doing:
 
 ## Gaps
 
-- No vtable→VA map: `WSHuman` ctor/vtable, `WSHumanManager`, and each
+- Not yet re-derived from the vtable map (which now exists, [`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)): `WSHuman` ctor/vtable, `WSHumanManager`, and each
   `WSHumanState*` subclass's Enter/Update/Exit are unpinned.
 - `WSHumanStateDisguise` has no string anchor — the disguise evidence pins the
   *suspicion meter* and `WSPlayer::ShortcutForceDisguise`, not the state class.

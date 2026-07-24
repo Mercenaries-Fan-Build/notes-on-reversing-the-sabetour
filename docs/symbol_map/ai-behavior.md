@@ -5,7 +5,7 @@ The AI & Behavior subsystem is the largest in the WildStar/Odin engine (~103 `WS
 ## How the evidence was obtained
 
 The Ghidra decomp of the retail binary retains the original EA build's `__FILE__`/`__FUNCTION__` assertion strings, e.g.
-`"...\WildStar\Ai\Helpers\WSAIPanicker.cpp"` immediately followed by `"WSAIPanicker::Update"`. These string pairs sit inside the very function body they name, so each pins a concrete `FUN_` VA to a real `Class::Method`. Every VA below was located that way (path+method anchor inside the function) and cross-checked against the `WSAI*` RTTI class list and the Lua corpus behavior. This is far more reliable than the (still-missing) vtable→VA map, and covers the controller / path-follower / helper / behavior / attraction-point / reactor / manager code paths that carry assertions.
+`"...\WildStar\Ai\Helpers\WSAIPanicker.cpp"` immediately followed by `"WSAIPanicker::Update"`. These string pairs sit inside the very function body they name, so each pins a concrete `FUN_` VA to a real `Class::Method`. Every VA below was located that way (path+method anchor inside the function) and cross-checked against the `WSAI*` RTTI class list and the Lua corpus behavior. This is far more reliable than a vtable→VA lookup (which now also exists — [`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv), 2,586 classes / 81,561 slots), and covers the controller / path-follower / helper / behavior / attraction-point / reactor / manager code paths that carry assertions.
 
 ## Architecture (as recovered)
 
@@ -63,8 +63,8 @@ Worked examples in the corpus: `ScriptControllers/HumanSpawner.lua` (spawn → `
 
 ## Gaps
 
-- **Spawner / pathfinder / manager method names are not pinned by string.** `WSAISpawner`, `WSAISpawnManager`, `WSAIManager`, `WSAIPathfinder`, `WSAIPathfinderTask*`, `WSGpsPathFinder`, `WSAIWanderer`, `WSAINeedsTracker`, and `WSAISquad` carry few/no `__FUNCTION__` assertions, so their concrete VAs need the (still-unbuilt) **vtable→VA map**. The three `WSAI*` name strings that *do* appear for these (`WSAIWanderer`, `WSAINeedsTracker`, `WSAIPanicker` near lines 583545-583609) are RTTI type-name `strncpy`s in a constructor/registration blob, not method bodies — useful for locating the classes but not individual methods.
-- **Lua binding thunks not linked to C++ impls.** `Nav.SetScriptedPath`, `Squad.Create`, etc. are registered names (in `lua_bindings.txt`), but the registration table that maps each name to its C thunk was not located in this pass, so the binding→`FUN_` edge is inferred by behavior, not proven.
+- **Spawner / pathfinder / manager method names are not pinned by string.** `WSAISpawner`, `WSAISpawnManager`, `WSAIManager`, `WSAIPathfinder`, `WSAIPathfinderTask*`, `WSGpsPathFinder`, `WSAIWanderer`, `WSAINeedsTracker`, and `WSAISquad` carry few/no `__FUNCTION__` assertions, so their concrete VAs must come from the **vtable→VA map** — which now exists ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)); this promotion pass has not yet been run.  ⚠️ Note `WSAISquad` is not a real class (see the retraction below); the `Squad.*` bindings are real. The three `WSAI*` name strings that *do* appear for these (`WSAIWanderer`, `WSAINeedsTracker`, `WSAIPanicker` near lines 583545-583609) are RTTI type-name `strncpy`s in a constructor/registration blob, not method bodies — useful for locating the classes but not individual methods.
+- ~~**Lua binding thunks not linked to C++ impls.**~~ ✅ **Resolved 2026-07-24.** The registration table was located: [`lua_registration_map.tsv`](../../data/lua_registration_map.tsv) maps all **898** bindings to `impl_va` / `thunk_va` / `vtable_va` plus the C++ symbol. `Nav.SetScriptedPath`, `Squad.Create` and the rest are now proven edges, not behavioural inferences. (Use that file, **not** `lua_bindings.txt`, which lists C++ symbols — 256 of 898 differ from the Lua name.)
 - **`WSAIPathFollowerHuman::ChooseAndPlayCoverAnims` vs `BeginState`** share a file; the two VAs (`FUN_00861c40`, `FUN_00864738`) are distinguished only by their own anchor strings — correct, but the surrounding helpers (cover-point selection) are unnamed.
 - Several manager update loops (`WSAICrowdManager`, `WSAITrafficManager`, `WSAIAutoPopManager`, `WSAICorpseManager`) were seen only via their `WSAICrowder`/`WSAITrafficAvoider` per-agent classes; the manager-level tick functions remain unpinned.
 
@@ -87,7 +87,7 @@ Worked examples in the corpus: `ScriptControllers/HumanSpawner.lua` (spawn → `
 
 - ws_engine_classes.txt is NOT exhaustive: WSAISuspicionRadius, WSAIExecutionManager, and a bare 'WSAICrowd' class are absent from it (it only lists WSAICrowder/WSAICrowdManager/WSAICrowdBlocker), yet all three appear as __FUNCTION__ strings in the decomp. Class-existence claims for those rest solely on the anchor strings, not on the RTTI/class list.
 - Role attributions rest on __FUNCTION__/assertion anchor strings + .cpp path constants, NOT on verified decompiled control flow. The bodies are heavy Ghidra pointer-soup (FUN_008bf650 is declared as void __thiscall FUN_008bf650(int*, int******) with `int ******` locals); the logic itself was not shown to implement the claimed behavior, only that the function was compiled from the named source file. This is strong-but-indirect evidence.
-- Lua binding namespaces (Nav., Squad., AttractionPt.) are the doc author's inference — lua_bindings.txt is a flat, prefix-less list, so the table groupings are unproven from this data.
+- ~~Lua binding namespaces (Nav., Squad., AttractionPt.) are the doc author's inference — lua_bindings.txt is a flat, prefix-less list, so the table groupings are unproven from this data.~~ **Resolved 2026-07-24: the groupings are correct and now provable.** `lua_bindings.txt` is prefix-less because it lists *C++ symbols*; `data/lua_registration_map.tsv` carries the real Lua table + name for all 898 bindings, and `Nav.`/`Squad.`/`AttractionPt.` are all genuine registered tables.
 
 **Verifier corrections:**
 
@@ -95,10 +95,26 @@ Worked examples in the corpus: `ScriptControllers/HumanSpawner.lua` (spawn → `
 
 **Functions: all 23 key VAs CONFIRMED.** Headers exist at claimed VAs, anchor strings land at the exact claimed line numbers inside the correct bodies, and every asserted size matches (13260/7087/2630/2473). `.cpp` source-path constants corroborate the subsystem for each.
 
-**Lua API naming is partly wrong (the underlying functionality exists, the names do not):**
+**~~Lua API naming is partly wrong~~ — ❌ RETRACTED 2026-07-24. The corrections below were themselves
+wrong; the doc's original `Squad.` / `AttractionPt.` / `Nav.` groupings are correct. Do not apply them.**
 
-- Squad.* is misrepresented. The doc lists `Squad.Create, Squad.AddMember, Squad.SetEnemy, Squad.SetLeader, Squad.Delete, Squad.SetRadius, Squad.SetLethal, Squad.FollowLeader, Squad.ClearBehavior`. The actual registered binding names are **`CreateSquad`, `AddToSquad`, `SetSquadEnemy`, `SetSquadLeader`, `DeleteSquad`, `SetSquadRadius`, `SetSquadLethal`, `FollowSquadLeader`, `ClearSquadBehavior`** (verb+Squad+noun form; there is no `Squad.` table in lua_bindings.txt). Fix the API names.
-- `AttractionPt.EnableUse` does not exist — the actual binding is **`AttractionPtEnable`** (line 41). `AttractionPtFindPtInObject` (line 42) does exist and maps to the doc's `AttractionPt.FindPtInObject`.
-- Nav.* bare names all exist (`SetScriptedPath` 692, `SetScriptedPathMoveMode` 693, `SetScriptedPathSpeed` 694, `FollowObject` 230, `MoveToObject` 436, `MoveToPoint` 437, `CancelScriptedPath` 79, `StopMoving` 762, `EnterFormation` 202, `ExitFormation` 205, `CreateFormation` 137, `AddMemberToFormation` 18, `CanPathfind` 80). The `Nav.` prefix is a reasonable but unproven grouping. Note also `NavBoardVehicle` (438) exists alongside `BoardVehicle` (62).
+Root cause: **`data/lua_bindings.txt` is a list of C++ symbols, not Lua-callable names**, and 256 of
+the 898 differ. The verifier looked up the Lua name, failed to find it, and concluded the table did
+not exist. `data/lua_registration_map.tsv` (which carries both) settles it:
+
+- ~~"there is no `Squad.` table"~~ — **there is**: 18 registered bindings. `Squad.Create` → C++
+  `CreateSquad`, `Squad.AddMember` → `AddToSquad`, `Squad.SetEnemy` → `SetSquadEnemy`,
+  `Squad.ClearBehavior` → `ClearSquadBehavior`, … Every name the doc listed resolves. (Independently
+  reconfirmed from the Lua corpus: 13 distinct `Squad.*` methods across 189 call sites, all 13
+  resolving — see `docs/sab-engine-lua-seam/06-lua-side-wrapper-layer.md`.)
+- ~~"`AttractionPt.EnableUse` does not exist; it is `AttractionPtEnable`"~~ — **both exist and this
+  inverts them**: `AttractionPt.EnableUse` → C++ `UsePtEnable`, while C++ `AttractionPtEnable` is
+  registered as `AttractionPt.**EnableBroadcast**`. Applying this "fix" would have swapped two
+  distinct bindings.
+- The `Nav.` prefix is likewise real (23 registered `Nav.*` rows), not "a reasonable but unproven
+  grouping". 22 of the 23 Lua names are byte-identical to the C++ symbol; the sole exception is
+  `NavBoardVehicle`.
+
+**Read `data/lua_registration_map.tsv`, not `lua_bindings.txt`, for anything Lua-visible.**
 
 **Class list caveat:** WSAISuspicionRadius, WSAIExecutionManager, and a bare WSAICrowd class are referenced by the decomp anchors but are absent from ws_engine_classes.txt (which lists WSAICrowder/WSAICrowdManager/WSAICrowdBlocker instead). Treat ws_engine_classes.txt as a partial list, not authoritative for existence.

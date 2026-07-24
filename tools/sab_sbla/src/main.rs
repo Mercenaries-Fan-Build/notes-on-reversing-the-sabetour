@@ -29,9 +29,11 @@
 //!       +0x00 u32 hash        // per-sub-asset name/type hash (pandemic_hash); 0 => section
 //!                             //   boundary "placeholder" (shares the next record's offset;
 //!                             //   contributes NO bytes to the body / does not advance the cursor)
-//!       +0x04 u32 offset      // running offset of this record's compressed blob. Chains:
-//!                             //   offset[0] = `first`; offset[i] = offset[i-1] + compSize[i-1]
-//!                             //   for real records (hash!=0). See FUN_00658870's accumulate loop.
+//!       +0x04 u32 offset      // running offset of this record's compressed blob, RELATIVE TO
+//!                             //   `dir_end` (NOT an absolute file offset — see the note below).
+//!                             //   Chains: offset[0] = `first`; offset[i] = offset[i-1] +
+//!                             //   compSize[i-1] for real records (hash!=0). See FUN_00658870's
+//!                             //   accumulate loop.
 //!       +0x08 u32 compSize    // stored (zlib-compressed) byte length of the blob
 //!       +0x0C u32 uncompSize  // decompressed byte length
 //!       +0x10 u32 f4          // flags/lod (0 or 1 observed)
@@ -46,12 +48,28 @@
 //!   TRAILING [blob_base+span, EOF): footer/padding, preserved verbatim.
 //!
 //!   BLOB PLACEMENT MODELS (deterministic from the parse):
-//!     * "abs"  when first >= dir_end  → the `offset` field is the real file offset; the blob
-//!              region begins at `first` (== header aux0), MIDDLE sits between the directory and
-//!              it, and a footer may trail the body. (Most single/multi-mesh object sub-packs.)
-//!     * "tail" otherwise (first < dir_end, i.e. relative offsets incl. streamblocks & large
-//!              merged objects) → blobs are stored at the END of the file: blob_base = EOF - span,
-//!              MIDDLE = [dir_end, blob_base), no trailing.
+//!     * "middle" when first >= dir_end (the object variant, flags=0x00) → `offset` is relative to
+//!              `dir_end`, so blob_base = dir_end + first. MIDDLE is then exactly `first` bytes
+//!              long, which is what header aux1 records. A small footer may trail the body.
+//!     * "tail" otherwise (first < dir_end — streamblocks, where first == 0) → blobs are stored at
+//!              the END of the file: blob_base = EOF - span, MIDDLE = [dir_end, blob_base).
+//!
+//!   ⚠️ HISTORY — the `offset` field is dir_end-RELATIVE, not absolute.
+//!   This model previously treated the object variant's `offset` as an absolute file offset
+//!   (blob_base = first). That is wrong by exactly `dir_end`, and it silently absorbed the
+//!   difference into a phantom TRAILING region whose size was always exactly `dir_end`.
+//!   `list`/`rebuild`/`scan` could not detect it: they relay every region verbatim, so an
+//!   internally consistent but mis-based split still reproduces the input byte-for-byte. Only
+//!   `replace`, which actually places bytes, exposed it — it wrote each new blob `dir_end` bytes
+//!   too early, clipping the tail of the preceding asset. A "no-op" replace with a byte-identical
+//!   blob corrupted 46 372 bytes of Palettes0 entry #100 and produced a validator FATAL naming the
+//!   PRECEDING texture.
+//!   Evidence for the correction, over every ALBS sub-pack in Dynamic0 + Palettes0 + Mega0 +
+//!   Start0 + BelleStart0: for flags=0x00, `dir_end + first + span == fileSize` **exactly** in
+//!   1080 of 1137 sub-packs (trailing 0); the other 57 have a genuine small footer and in all of
+//!   them newTrailing == oldTrailing - dir_end. Under the old model not one had a zero trailing.
+//!   Byte-identity of rebuild/scan is unaffected: MIDDLE grows by dir_end and TRAILING shrinks by
+//!   dir_end, so the concatenation is unchanged.
 //!
 //! Splicing (`replace`) recomputes every record's `offset` field from the compSize chain and
 //! relays MIDDLE/TRAILING verbatim, so a no-op replace is byte-identical and a real edit keeps
@@ -69,7 +87,13 @@ struct Record { hash: u32, offset: u32, comp: u32, uncomp: u32, f4: u32, f5: u32
 impl Record { fn real(&self) -> bool { self.hash != 0 } }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Model { Abs, Tail }
+enum Model {
+    /// Object variant (flags=0x00): `offset` is relative to `dir_end`, so the blob region starts at
+    /// `dir_end + first` with a `first`-byte MIDDLE block in between.
+    Middle,
+    /// Streamblock variant (flags=0x3C, `first == 0`): blobs sit at the end of the file.
+    Tail,
+}
 
 struct Sbla {
     header: Vec<u8>,     // bytes [0, dir_start)
@@ -121,9 +145,11 @@ fn parse(buf: &[u8]) -> Result<Sbla, String> {
     if recs.is_empty() { return Err("empty directory".into()); }
     let dir_end = o;
     let span = cursor.wrapping_sub(first);
-    // deterministic placement model
+    // deterministic placement model. NOTE: for the object variant the `offset` field is relative
+    // to dir_end, so the blob region begins at dir_end + first (see the ⚠️ HISTORY note above) —
+    // treating it as absolute is what made `replace` write every blob dir_end bytes too early.
     let (model, blob_base) = if first as usize >= dir_end {
-        (Model::Abs, first as usize)
+        (Model::Middle, dir_end.checked_add(first as usize).ok_or("dir_end+first overflows")?)
     } else {
         (Model::Tail, size.checked_sub(span as usize).ok_or("span>size")?)
     };
@@ -197,14 +223,14 @@ fn replace(s: &Sbla, k: usize, new_comp: &[u8], new_uncomp: u32) -> Result<Sbla,
     new_recs[k].comp = new_comp.len() as u32;
     new_recs[k].uncomp = new_uncomp;
     let span: u32 = new_recs.iter().filter(|r| r.real()).map(|r| r.comp).sum();
-    // Abs: blob_base fixed at `first` (header aux0 unchanged). Tail: base recomputed at emit time
-    // (it's EOF-span, i.e. right after MIDDLE), which is implicit since we append body after middle.
+    // Both models emit as header + directory + MIDDLE + BODY + TRAILING, so the new body simply
+    // takes the old one's place and every downstream `offset` is recomputed by `build` from the
+    // compSize chain. `first` is unchanged because MIDDLE's length is unchanged, which is precisely
+    // why the offsets stay dir_end-relative and correct.
     let mut out = s_clone_meta(s);
     out.recs = new_recs;
     out.span = span;
     out.body = new_body;
-    // For Tail, blob_base/middle/trailing are still consistent (middle preserved, no trailing).
-    // For Abs, keep trailing footer as-is. blob_base recorded for reference only.
     Ok(out)
 }
 
@@ -294,6 +320,11 @@ fn main() {
             let nb = read_file(&a[4]);
             let nus = if a[5] == "-" { s.recs[k].uncomp }
                 else { a[5].trim_start_matches("0x").parse().or_else(|_| u32::from_str_radix(a[5].trim_start_matches("0x"), 16)).unwrap_or_else(|_| { eprintln!("bad uncompSz"); std::process::exit(1); }) };
+            if s.model == Model::Tail {
+                eprintln!("[replace] WARNING: streamblock variant (flags=0x3C). The object variant's \
+                           dir_end-relative placement is verified against retail; this one is NOT. \
+                           Validate the result with sab_validator before trusting it.");
+            }
             let ns = replace(&s, k, &nb, nus).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1); });
             let out = build(&ns);
             write_file(&a[6], &out);

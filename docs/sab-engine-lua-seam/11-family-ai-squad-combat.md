@@ -375,8 +375,17 @@ are **called but never registered**, and which have no Lua-side definition eithe
 | `Combat.SetQuestioningState` | `Modules/Behavior/Human/Starter/FreeplayStarter.lua:36` | not registered |
 | `Combat.AlwaysSeeTarget` | `Modules/Libraries/AggroSpawner.lua:221` | not registered |
 
-Absence is a byte-level fact from the tsv (read from the exe's registration stanzas), and none of the ten
-appears as a string anywhere in the 54 MB decomp. In Lua 5.1 these calls index a nil field, which raises
+Absence is a byte-level fact from the tsv (read from the exe's registration stanzas), and it is corroborated
+by a raw string scan of `Saboteur.exe` itself: eight of the ten names (`SetInvestigate`, `SetQuestioning`,
+`TakeCover`, `DoRandomRangedMovement`, `SetFriendlyFire`, `SetAutoFire`, `LockIntoCombat`,
+`SetQuestioningState`) occur **0×** in the file as ASCII or UTF-16, while every registered neighbour is
+there in the clear (`SetAlwaysSeeTarget` 3×, `LockIntoMelee` 3×, `SetHunt` 3×). `AlwaysSeeTarget` matches 3×
+only as a substring of `SetAlwaysSeeTarget`, and `Init` is too generic to test. ⚠️ *(corrected 2026-07-24:
+this previously cited "none of the ten appears as a string anywhere in the 54 MB decomp", which proves
+nothing — registration name strings live in `.rdata`, not in decompiled code, so **registered** bindings
+score 0 there too. `SetAlwaysSeeTarget` is registered as `Combat.SetAlwaysSeeTarget` at `0x00722370` and has
+0 decomp hits. The exe string scan is the discriminating test; the conclusion is unchanged.)* In Lua 5.1
+these calls index a nil field, which raises
 `attempt to call field 'X' (a nil value)` — a hard error, not a silent no-op like a bad handle.
 
 Most are in `Experimental/`, which is plainly a dev sandbox and probably never loaded at runtime. But four

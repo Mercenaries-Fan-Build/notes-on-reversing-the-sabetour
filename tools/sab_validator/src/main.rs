@@ -3,7 +3,9 @@
 //! decomp function it is derived from.
 //!
 //! Usage:
-//!   sab_validator <asset>            audit a .megapack / .kilopack, an ALBS sub-pack, or a DTEX
+//!   sab_validator <asset>            audit a .megapack / .kilopack or an ALBS sub-pack
+//!                                    (the DTEX and MSHA records inside are validated as it descends;
+//!                                     a bare .dtex file is not a supported top-level input)
 //!   sab_validator <asset> --limit N  only descend the first N megapack entries (fast smoke test)
 //!   sab_validator <asset> --json out.json      also write the machine report
 //!   sab_validator <asset> --max-issues N       cap printed issues (default 60; 0 = all)
@@ -126,8 +128,10 @@ fn usage() -> ! {
     eprintln!(
         "sab_validator <asset> [--limit N] [--json out.json] [--max-issues N] [--quiet]\n\
          \n\
-         Audits a Saboteur .megapack/.kilopack, ALBS sub-pack, or DTEX record the way the engine\n\
-         mount path (FUN_00e428c0 -> FUN_00658870) would consume it. Exit 0 = no fatal findings."
+         Audits a Saboteur .megapack/.kilopack or ALBS sub-pack the way the engine mount path\n\
+         (FUN_00e428c0 -> FUN_00658870) would consume it, validating the DTEX and MSHA records\n\
+         found inside. <asset> must start with the 00PM or ALBS magic; a carved standalone .dtex\n\
+         is not accepted. Exit 0 = no fatal findings."
     );
     exit(2);
 }

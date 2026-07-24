@@ -219,7 +219,8 @@ characters' banks: `civ_` 178, `nazi_` 110, `shrd_` 15, `sky_` 7.
    prototype is an OLDER format version** — magic `AP04`, block `ADD0`, BANK entries only 8 B with **no
    `nExtra`/`extra[]`** — and **cannot** yield the retail layout. Correct target:
    `C:/GOG Games/The Saboteur/Saboteur.exe` (imgbase `0x400000`), `LoadAnimPackFile` @ **VA `0x00e2f810`
-   / file `0xa2e410`**. Use the symbol-rich PPC debug build (`WildStar_d.exe`/`.map`) only to *name*
+   / file `0xa2ea10`** *(file offset corrected 2026-07-24; `0x00e2f810 - 0x400E00 = 0xA2EA10`, where the
+   `6a ff 68 … 81 ec 94 06 00 00` SEH prologue actually starts — the old `0xa2e410` landed mid-function)*. Use the symbol-rich PPC debug build (`WildStar_d.exe`/`.map`) only to *name*
    fields.
 
 ### Not decoded
@@ -245,8 +246,12 @@ distinguish, resolving them by **disassembling `Saboteur.exe` directly** (the TH
 ### AP0L → HKX carve
 `u32 numAnims; u32 hkSize;` immediately precede the first Havok packfile magic `57 e0 e0 57`; the blob is
 `hkSize` bytes. Retail main blob: magic at file `0xDECE1`, `numAnims=2214`, `hkSize=0x80FB00`; self-check
-`0xDECE1 + hkSize` lands exactly on the packfile's declared end. (7,495 further packfiles in the pack are
-per-clip *streamed* sub-animations; the class-string count 9,709 = 2,214 + one per streamed packfile.)
+`0xDECE1 + hkSize` lands exactly on the packfile's declared end. (The pack holds **7,495** `57 e0 e0 57` magics in total = this 1 main blob + **7,494** further packfiles,
+which are per-clip *streamed* sub-animations; the `hkaSplineCompressedAnimation` class-string count
+9,709 = **2,215** inside the main blob + one per streamed packfile (7,494).) *(corrected 2026-07-24:
+both terms were previously off by one — "7,495 further" and "2,214 +". The 9,709 total was right, and
+the 2,214 animation **clips** figure is a separate, correct claim: the main blob carries 2,214 clips but
+2,215 copies of the class string.)*
 
 ### Havok 6.5 packfile (LE, 32-bit)
 Header: magic `0x57E0E057 0x10C0C010`, fileVersion 6, layoutRules `04 01 00 01` (4-byte pointers, LE),

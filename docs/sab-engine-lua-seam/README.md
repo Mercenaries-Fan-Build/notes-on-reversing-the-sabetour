@@ -186,9 +186,14 @@ mental model. **The orphan gap that dominated this list is closed** — all 898 
    RTTI class's vtable is cheap and would firm up [03 §4](03-handle-and-object-model.md).
 8. **Where is `DAT_0143db28` written?** 279 reads, no surviving store. Finding it pins the handle map's
    owner class by RTTI. ([03 Q1](03-handle-and-object-model.md#open-questions))
-9. **Is the 898 list a census or a floor?** [06](06-lua-side-wrapper-layer.md) found 46 live namespaced
-   calls with no binding and no Lua definition; ≥165 bindings are unreachable from the corpus. The
-   [2008 pre-release build](../../docs/community_tooling.md) would settle both directly.
+9. ~~**Is the 898 list a census or a floor?**~~ ✅ **CLOSED 2026-07-24 — it is a census.** [06](06-lua-side-wrapper-layer.md)'s
+   "46 live namespaced calls with no binding" was a matcher artifact: it compared Lua names against
+   **C++ symbols**, and 256 of the 898 differ. At least 5 of its 28 named orphans are in
+   `data/lua_registration_map.tsv`, including its own load-bearing example `Util.SetDisableControls`
+   (C++ `SetDisableControlsTable`). ≈24 genuine orphans remain. The "≥165 unreachable" figure rests on
+   the same matcher and **needs recomputing** as a join against the registration map — the `Squad.*`
+   table alone (18 bindings, 189 corpus call sites) was wrongly counted as entirely dead.
+   See [00 §8.2](00-seam-overview.md).
 
 **Two stale sections to be aware of.** The registration map post-dates the mechanics docs and silently
 closes some of their open questions — [04 Q5](04-vm-lifecycle-and-script-objects.md#open-questions) says

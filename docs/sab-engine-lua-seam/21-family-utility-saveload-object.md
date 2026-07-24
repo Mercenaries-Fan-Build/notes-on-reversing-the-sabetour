@@ -7,7 +7,8 @@
 > float/table, `FUN_0099bc00`'s 7 callers and the five field accessors' full name vocabulary all confirmed;
 > corpus citations spot-checked and real. **Corrected:** the `require` evidence (29 of 321 files, not
 > "every script"), the `Trigger` counts (9 `Create*`, not 13; 23 of 23 handle-first, not 20; **three** `0R`
-> members, not two — `Trigger.WaitFor` returns a trigger ID at 58 call sites), the `vtable+0xdb8`
+> members, not two — `Trigger.WaitFor` returns a trigger ID, and **58 of its 309 direct call sites bind
+> that return value**; *clarified 2026-07-24, the earlier "at 58 call sites" read as a call count*), the `vtable+0xdb8`
 > misreading, and "no binding raises a Lua error" downgraded from asserted fact to inferred per
 > [02](02-marshalling-abi.md).
 

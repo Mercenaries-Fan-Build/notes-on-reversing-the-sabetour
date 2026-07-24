@@ -24,9 +24,14 @@ tooling is the universal gap. Two capabilities are *hard-blocked* for them; seve
 ### Research assets & references (received 2026-07 from a community mod maker)
 
 - **Pre-release build: The Saboteur (2008-05-20)** — a [7z archive](https://www.mediafire.com/file/t7mh5jiy7bq2g8m/The_Saboteur_(2008-05-20).7z/file)
-  of an early build, ~18 months before the 2009 retail. **High RE value, not yet obtained locally:**
-  pre-release Pandemic builds are frequently less-stripped (possible debug data / symbols) and can carry
-  older or looser asset formats. A retail-vs-2008 diff is a strong lead — see the queued task below.
+  of an early build, ~18 months before the 2009 retail. ✅ **Obtained and exploited (status corrected
+  2026-07-24 — this previously read "not yet obtained locally", and pointed at a "queued task below"
+  that does not exist in this file).** The hunch paid off in full: the build ships **complete PDBs plus
+  a 119,119-symbol linker map** with the source `.obj` per function across 2,275 translation units.
+  It is `game-files/The Saboteur (2008-05-20 prototype).7z`, extracted to `game-files/symbols/`
+  (both gitignored). Products already landed: `data/symbol_map/pc_symbol_map.tsv` (1,414 named PC
+  functions) and `data/symbol_map/pc_vtables.tsv` (2,586 classes / 81,561 slots), plus the 16 docs in
+  `docs/symbol_map/`. See `memory/prototype-symbols-goldmine`.
 - **Mission catalog** — a [community Google Sheet](https://docs.google.com/spreadsheets/d/12oW0kqT4ZXQDrv0Q9z9yCwqTrjSbKcyIbkB-hAwMBlw/edit)
   enumerating the game's missions; a naming reference for when we work through the Lua mission scripts.
 - **Lua cross-checks for our cracked `.luap`**: **LuapExplorer** (independent C# `.luap` reader/editor)
@@ -58,7 +63,7 @@ tooling is the universal gap. Two capabilities are *hard-blocked* for them; seve
   - **ALBS bundle** (their `'ALBS'` FourCC = our little-endian **SBLA**, cf. `tools/sab_sbla`): `DynFile`
     offsets are relative to the *end of the tables*, not the bundle start.
   - **Independently confirms the patch-megapack override layer** (`patchdynamic0.megapack`,
-    `patchpalettes0.megapack`, `patchmega0..2`) that §4 / [`binary_recon.md`](binary_recon.md) describe —
+    `patchpalettes0.megapack`, `patchmega0..2`) that §4 / [`lineage_and_divergence.md`](lineage_and_divergence.md) + [`formats/archive_and_models.md`](formats/archive_and_models.md) describe —
     they verified the engine opening `patchdynamic0.megapack` with Process Monitor.
 
   Note their premise — *"Saboteur.exe is SecuROM-packed, so static analysis is useless"* — is true only of
@@ -68,15 +73,30 @@ tooling is the universal gap. Two capabilities are *hard-blocked* for them; seve
 
 ## What they explicitly CANNOT do (our biggest openings)
 
-### 1. Decode Havok animations → keyframes  ★ highest value, real work
+### 1. Decode Havok animations → keyframes  ★ ✅ DELIVERED (was "highest value, real work")
+
+> **Status corrected 2026-07-24.** This section was still written in the future tense, calling the
+> decoder "the single most-wanted missing capability" and carrying an "HONEST CAVEAT — our decoder
+> targets 5.5" that no longer describes the repo. **It is built and shipped:**
+> [`tools/sab_havok65`](../tools/sab_havok65/README.md) parses `Animations.pack`
+> (`AP0L`, `Havok-6.5.0-r1`, `numAnims=2214`) and decodes **2214/2214 clips clean** — 0 bad
+> quaternions, 0 frame mismatches — and exports to glTF/`.glb`. The corpus turned out to be **100%
+> `hkaSplineCompressedAnimation`**, i.e. one known format rather than the blocked Mercs 2 wavelet.
+> Method and adjudication: `memory/havok65-spline-decode`,
+> [`formats/animation_havok65.md`](formats/animation_havok65.md).
+> **This is now a contribution to offer, not a gap to fill.**
+
 [SaboteurToolset](https://github.com/PredatorCZ/SaboteurToolset)'s own docs: *"There is no way as in current version to convert extracted hkx
 files because of separated metadata."* They extract the raw HKX blob + FSM JSON from `animations.pack`
-(AP0L), but the **compressed animation is never decoded into keyframes/glTF**. Every Saboteur
-character/vehicle animation is currently un-viewable and un-editable.
+(AP0L), but the **compressed animation is never decoded into keyframes/glTF** — that is the gap we closed.
 
-We solved exactly this class of problem for Mercs 2: a **numerically-verified inverse-Haar wavelet
-decoder** (static-mask + quantization-format + per-block bitstream), plus interleaved, plus delta
-headers (`tools/hk_anim/`, `docs/modernization/wavelet_decode_verification.md`).
+*Historical note:* the approach came from solving this class of problem for Mercs 2 — a
+**numerically-verified inverse-Haar wavelet decoder** (static-mask + quantization-format + per-block
+bitstream), plus interleaved and delta headers. That work lives in the **sibling** repo
+(`notes-on-the-released-game/tools/hk_anim/`,
+`notes-on-the-released-game/docs/modernization/wavelet_decode_verification.md`) — ⚠️ *those bare paths
+previously read as if they were in this repo; they are not.* Per `AGENTS.md`, only the *methodology*
+carried over: Saboteur is Havok **6.5** and spline-compressed, so none of the 5.5 struct detail transferred.
 
 **HONEST CAVEAT — version mismatch.** Saboteur ships **Havok 6.5.0** (`Havok-6.5.0-r1`, build path
 `d:\Projects\WildStar\Main\code\Havok_65\`), whereas our decoder targets **Havok 5.5 (HK550)**. The
@@ -114,7 +134,9 @@ would let every other tool author work from ground truth instead of guessing.
 writes the **texture** path (megapack/ALBS/DTEX) into additive patch megapacks, and independently confirmed
 the **built-in override mechanism**: the engine mounts `patchmega0.megapack` / `patchdynamic0.megapack` /
 `patchpalettes0.megapack` at ~1000× base priority (hash wins) — a clean, no-surgery mod path (see
-[`binary_recon.md`](binary_recon.md)). That closes the texture-writer gap from their side.
+[`formats/megapack_write.md`](formats/megapack_write.md) and
+[`formats/archive_and_models.md`](formats/archive_and_models.md); `binary_recon.md`, cited here
+previously, never covered the patch layer). That closes the texture-writer gap from their side.
 
 Where our clean decomp still uniquely helps: (a) the **engine-side loader semantics** behind the crash-rules
 they found empirically (e.g. the interleaved-mip walk that crashes on desync — readable in our unpacked

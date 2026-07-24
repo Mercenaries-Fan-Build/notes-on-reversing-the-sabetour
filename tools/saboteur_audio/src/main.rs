@@ -6,11 +6,17 @@
 //   +0x04 u32 block align (2048)
 //   +0x08 u32 version (2)
 //   +0x0C u32 bankCount
-//   +0x10 u32 (unused here)
+//   +0x10 u32 bankTableOffset   -- always 0x1C on retail
 //   +0x14 u32 streamCount
-//   +0x18 u32 (unused here)
-//   +0x28 : record table, 12 bytes each { u32 id, u32 size, u32 offset(absolute) }
+//   +0x18 u32 streamTableOffset -- always bankTableOffset + bankCount*12
+//   +0x1C : record table, 12 bytes each { u32 id, u32 size, u32 offset(absolute) }
 //           first `bankCount` records are .bnk (BKHD), next `streamCount` are loose .wem (RIFF).
+//           The two sub-tables are contiguous, so both are read as one run from bankTableOffset.
+//
+// NOTE: this table was previously read from a hardcoded +0x28, which skipped the first record and
+// read one record past the end of every pack -- silently losing 1 real stream per pack (8 across the
+// 4 VO languages x main+DLC). Verified against all 10 retail packs: reading from bankTableOffset
+// validates 100% of records by magic (BKHD/RIFF); reading from 0x28 mis-reads exactly 2 per pack.
 //
 // Usage:
 //   saboteur_audio --game <dir> --out <dir> --vgmstream <exe> --langs eng,fra,deu,ita
@@ -31,15 +37,25 @@ struct Rec { id: u32, size: u32, offset: u32 }
 struct PckInfo { banks: u32, streams: u32, recs: Vec<Rec> }
 
 fn parse_pck_header(f: &mut File) -> std::io::Result<PckInfo> {
-    let mut h = [0u8; 0x28];
+    let mut h = [0u8; 0x1C];
     f.seek(SeekFrom::Start(0))?;
     f.read_exact(&mut h)?;
     assert_eq!(u32le(&h, 0), 0x5043_4B31, "not a 1KCP pack");
     let banks = u32le(&h, 0x0C);
+    let bank_tbl = u32le(&h, 0x10);
     let streams = u32le(&h, 0x14);
+    let stream_tbl = u32le(&h, 0x18);
+    // The stream sub-table directly follows the bank sub-table; assert it so a pack that ever
+    // breaks the assumption fails loudly instead of silently carving garbage.
+    assert_eq!(
+        stream_tbl,
+        bank_tbl + banks * 12,
+        "1KCP sub-tables are not contiguous (bankTable={:#x} banks={} streamTable={:#x})",
+        bank_tbl, banks, stream_tbl
+    );
     let total = (banks + streams) as usize;
     let mut tbl = vec![0u8; total * 12];
-    f.seek(SeekFrom::Start(0x28))?;
+    f.seek(SeekFrom::Start(bank_tbl as u64))?;
     f.read_exact(&mut tbl)?;
     let mut recs = Vec::with_capacity(total);
     for i in 0..total {

@@ -3,7 +3,21 @@
 **Goal:** replace the player character Sean Devlin with Mattias Nilsson, ported from the Mercenaries 2
 work in the sibling repo. This is a **multi-stage project**, not a one-shot. This doc scopes every stage
 with its inputs/outputs, effort, risk, and a concrete verification gate, so the scope can be chosen before
-any code is written. Nothing here is built yet except Stage 0.
+any code is written.
+
+> **⚠️ Status (2026-07-24): this is no longer a pre-implementation plan.** The line that used to sit
+> here — *"Nothing here is built yet except Stage 0"* — contradicted the rest of the document:
+> **Stages 1–4 are each marked ✅ DONE below, and Stage 5 records "Deployed (`sab_poc deploy`)"**. All
+> six `sab_poc` subcommands the doc invokes exist (`mesh-import`, `retarget`, `tex-import`, `mattias`,
+> `deploy`, `gltf-info`) and `output/mattias_port/` holds the built artifacts.
+>
+> **It is deployed with a known defect, not finished.** Per `memory/mattias-parts-all-in-HD-stub-bug`,
+> the port baked the whole body (24,893 verts) into `_HD` and left `_LB`/`_UB`/`_GR`/`_HAT` as 3-vert
+> stubs. Because the combined-LOD/cutscene path renders **per part**, the character is invisible in
+> cutscenes. Sean's real split is `_HD` 168 / `_UB` 182 / `_LB` 182 / `_GR` 191 / `_HAT` 105 bones
+> (plus `_FM` face and `_FX`). The fix is to port the part-splitting — see the "part-splitting trap"
+> section of [`tools/workflows/port-a-character.md`](tools/workflows/port-a-character.md), which
+> documents it properly. Read Stage 5 below as *open*, not delivered.
 
 > **Three meanings of "replace Sean with Mattias" — pick the target.**
 > 1. **Cosmetic reskin** — Mattias's *textures* on Sean's *geometry*. Cheap, but it's Sean's body shape.
@@ -16,7 +30,7 @@ any code is written. Nothing here is built yet except Stage 0.
 | Asset / capability | Where | State |
 |---|---|---|
 | Mattias geometry, **rigged** (skin + skeleton) | `notes-on-the-released-game/output/char/mattias.glb` (29 MB) | ✅ glTF — **116 joints**, skin (JOINTS_0/WEIGHTS_0 + invBind), 97 clips. The rig source. |
-| Mattias geometry+materials, **static** | `…/tools/wad_simulator/workshop_export/pmc_hum_mattias/` (OBJ+MTL+25 PNG) | ✅ 22,512 v / 35,344 tri / 34 mats (Kd/Bump/Ks); **no rig** — material map only |
+| Mattias geometry+materials, **static** | ⚠️ `…/tools/wad_simulator/workshop_export/pmc_hum_mattias/` **no longer exists** (that dir now holds only `pmc_hum_jen_v3`); the surviving source is `…/tools/mercs2-skinner/templates/pmc_hum_mattias{,_v2,_v3,_v4}/` | ✅ 22,512 v / 35,344 tri / 34 mats (Kd/Bump/Ks); **no rig** — material map only |
 | Mattias textures + raw blocks | `…/output/human_blocks/…mattias_v*`, DLC head | ✅ present |
 | Sean's skeleton (Saboteur rig) | `output/skeletons/CH_AL_SeanDevlin.skel` | ✅ ~190 bones, named (`Bone_Hips`, `Bone_LThigh`…) |
 | Sean's merged mesh + parts | `output/skeletons/CH_AL_SeanDevlin.smsh`, `parts/sean_{HD,UB,LB,GR,HAT}.smsh` | ✅ read |
@@ -197,15 +211,24 @@ Stage 0 ✅ ── Stage 1 (mesh writer, prove on Sean) ── Stage 2 (Mattias 
 
 ## Open questions / unknowns to resolve as we go
 
-- Sean's merged-parts structure vs Mattias's single mesh (Stage 5) — the mapping is unclear until we read
-  Sean's actual MESH drawcall/part layout in the bundle.
-- Exact scale/coordinate transform Mercs 2 → Saboteur (Stage 2/3).
-- Whether Mattias's Mercs 2 bone names survive into `mattias.glb` cleanly enough for name-based
-  correspondence, or whether the map is mostly manual (Stage 3).
-- Material/drawcall hashes: the new mesh's drawcalls must reference resolvable textures. PC has no WSAO, so
-  textures resolve by **DTEX name-hash** (see `sab_workshop/src/resolve.rs`) — the mesh and its DTEX names
-  must agree.
+**Still open:**
+
+- Sean's merged-parts structure vs Mattias's single mesh (Stage 5) — **now the blocking defect**, not
+  merely unclear: see the status banner at the top. Sean's split is known
+  (`_HD`/`_UB`/`_LB`/`_GR`/`_HAT` = 168/182/182/191/105 bones); what is missing is the port emitting it.
 - Face/hands/accessories fidelity (fingers, facial rig) under retarget.
+
+**✅ Resolved — these were answered elsewhere in this same document:**
+
+- ~~Exact scale/coordinate transform Mercs 2 → Saboteur (Stage 2/3).~~ Answered in Stage 2: **scale is
+  a confirmed no-op**.
+- ~~Whether Mattias's Mercs 2 bone names survive … or whether the map is mostly manual (Stage 3).~~
+  Answered in Stage 3: **59 direct / 57 folded to ancestors / 0 orphans**.
+- ~~Material/drawcall hashes … **PC has no WSAO**, so textures resolve by DTEX name-hash.~~ ❌ **The
+  premise was wrong.** WSAO **is** present on PC, as the loose `France.materials` (4,288,448 bytes) —
+  this document already says so at Stage 4 ("the 'absent' belief was a scanning miss"), and
+  `memory/wsao-material-format-and-gap` records the correction. The real chain is
+  `drawcall.material → WSMA record → WSTX texture-hash slice → DTEX by pandemic_hash`.
 
 ## Provenance & cross-repo note
 

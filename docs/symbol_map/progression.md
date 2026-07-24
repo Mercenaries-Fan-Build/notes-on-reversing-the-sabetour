@@ -147,7 +147,7 @@ pattern) unless noted "inferred".
 
 ## Gaps / caveats
 
-- **No RTTI vtable→VA map yet.** `WSPerksManager`, `WSPerk` and its subclasses
+- ✅ **The RTTI vtable→VA map now exists** ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv); `WSPerksManager` has 180 slots) — this doc predates it, so `WSPerksManager`, `WSPerk` and its subclasses
   (`WSCounterPerk`, `WSTimerPerk`, `WSTrackerPerk`, `WSDualTriggerPerk`),
   `WSPerkBlueprint`, `WSAmmo`/`WSAmmoBlueprint`, `WSMeleeWeapon`,
   `WSItemCache`, and `WSWeaponBlueprint` could not be pinned to concrete VAs —

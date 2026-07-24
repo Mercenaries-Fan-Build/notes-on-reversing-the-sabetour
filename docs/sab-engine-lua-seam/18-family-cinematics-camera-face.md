@@ -2,7 +2,9 @@
 
 > **Verified:** All 16 VAs re-checked against the tsv (exact match) and the decomp (14 present, 2 genuinely
 > absent as claimed); every stub's six bytes, the `60.0f`/`0.6f`/`-1.0f` constants, all bit-masks, the
-> `bLoop`→flag-`0x20` link, and every quoted corpus file:line re-read and confirmed; counts (88/28/25/27/10/5,
+> `bLoop`→flag-`0x20` link, and every quoted corpus file:line re-read and confirmed; counts (88/28/25/27/10/5
+> — ⚠️ *the 88 and 28 are name occurrences, not calls: 86 and 22 direct calls respectively; corrected
+> 2026-07-24*,
 > 24/24 boundary, 86 `inlined`) all reproduce. Corrected: the `60.0f` is in `.data`, not `.rdata`; the claim
 > that scripts "never" call the node bindings directly (three sites do, two of them cited in this doc's own
 > table); an unreproducible "16 of 21" wrapper count (actual: 10 wrapper sites vs 3 direct); `camera.md`'s
@@ -69,8 +71,8 @@ Optional args in `[]`. "Source (file:line)" is empty for all 16 — **no asserti
 
 | Binding | Namespaced form | VA | Source (file:line) | Signature | Confidence | Evidence |
 |---|---|---|---|---|---|---|
-| `PlayCinematic` | `Cin.PlayCinematic` | `0x0071dbc0` | — (no assert) | `(sName [, bLoop] [, sCallback, self] [, tParams] [, bFade] [, sMusic]) -> ()` | **confirmed** (identity, marshalling); *inferred* (arg names) | tsv row 180 (`LuaGlueFunctor0`/`adapter`); body `FUN_0071dbc0`; 88 corpus sites, widest is `Act_3_Mission_3.lua:1367` (7 args) |
-| `LoadCinematic` | `Cin.LoadCinematic` | `0x0071dd80` | — | `(sName [, sCallback, self] [, tParams]) -> ()` | **confirmed** (identity, marshalling) | tsv row 176; body `FUN_0071dd80` → `FUN_00951270(name, cb)`; 28 corpus sites, **all 1-arg** (`Act_1_BarFight.lua:33`) |
+| `PlayCinematic` | `Cin.PlayCinematic` | `0x0071dbc0` | — (no assert) | `(sName [, bLoop] [, sCallback, self] [, tParams] [, bFade] [, sMusic]) -> ()` | **confirmed** (identity, marshalling); *inferred* (arg names) | tsv row 180 (`LuaGlueFunctor0`/`adapter`); body `FUN_0071dbc0`; **86 direct calls + 2 deferred-action references** (88 name occurrences) — *corrected 2026-07-24*; widest is `Act_3_Mission_3.lua:1367` (7 args) |
+| `LoadCinematic` | `Cin.LoadCinematic` | `0x0071dd80` | — | `(sName [, sCallback, self] [, tParams]) -> ()` | **confirmed** (identity, marshalling) | tsv row 176; body `FUN_0071dd80` → `FUN_00951270(name, cb)`; **22 direct calls + 6 deferred-action references** (28 name occurrences), **all passing exactly one argument** — *corrected 2026-07-24* (`Act_1_BarFight.lua:33`) |
 | `PrePlayCinematic` | `Cin.PrePlayCinematic` | `0x0071c3b0` | — | `(sName) -> ()` | **confirmed** (identity, marshalling); *open* (semantics) | tsv row 184; body calls `FUN_0094f710(name, **1**, 0,0,0,0,&0)` — mode 1, vs mode 2 for Play. **Zero corpus call sites** |
 | `PauseCinematic` | `Cin.PauseCinematic` | `0x0071c430` | — | `(sName) -> ()` | **confirmed** | tsv row 178; body → `FUN_0094cab0(name)` → `FUN_00944b60()`; `Paris_6_Mission_1.lua:301,303,527,529` |
 | `StopCinematic` | `Cin.StopCinematic` | `0x0071c490` | — | `(sName [, bHard=true]) -> ()` | **confirmed** (marshalling); *inferred* (arg-2 meaning) | tsv row 191; body → `FUN_0094cb10(name, !bHard)`; 25 corpus sites, one 2-arg: `Act_1_Farm.lua:95` |
@@ -132,7 +134,7 @@ difference, `1` for Play and `0` for Load; the middle arguments differ too (Play
 parameter block `FUN_00950ef0(name, mode, cb, p5, bLoop, bFade, pMusic, 1)`, whereas Load hardcodes zeros
 and passes the callback in slot 3: `FUN_00950ef0(name, 0, cb, 0, 0, 0, &local, 0)`). **So
 `Cin.PlayCinematic` on an unloaded cinematic loads it on demand.** The
-28 `Cin.LoadCinematic` call sites in the corpus are a *latency* optimisation, not a correctness
+22 direct `Cin.LoadCinematic` call sites in the corpus (plus 6 deferred-action references) are a *latency* optimisation, not a correctness
 requirement — which is why they always appear a few hundred lines before the matching `PlayCinematic`
 (`Act_1_BarFight.lua:33` loads `"106_CinA_BarFight"`; the mission plays it much later) and why
 `Act_3_Mission_1.lua:544-570` fires six `PlayCinematic` calls with no `Load` in sight at all.
@@ -141,7 +143,12 @@ requirement — which is why they always appear a few hundred lines before the m
 invokes the callback **immediately, synchronously, inside the binding call**, rather than deferring it. A
 script that does `Cin.LoadCinematic(n, "M.Ready", self)` and expects `M.Ready` on a later frame is wrong if
 `n` is already resident. The corpus never finds out: **all 28 `Cin.LoadCinematic` sites pass exactly one
-argument**, so the callback path of `LoadCinematic` is dead code in the shipped scripts.
+argument** — 22 direct calls with a single string, plus 6 bare table-value references inside
+deferred-action pairs like `{ Cin.LoadCinematic, { "126_CinB_ToParis" } }`, whose args tables each hold
+exactly one element. ⚠️ *(corrected 2026-07-24: "28 call sites" counted name occurrences; docs
+[20](20-family-inventory-perks-shop.md) and [23](23-family-render-weather-fx.md) state the direct-call vs.
+bare-reference convention explicitly and this doc was not following it. The conclusion is unchanged.)* So
+the callback path of `LoadCinematic` is dead code in the shipped scripts.
 
 ### `Cin.PlayCinematic`'s argument list is positionally ambiguous — deliberately
 

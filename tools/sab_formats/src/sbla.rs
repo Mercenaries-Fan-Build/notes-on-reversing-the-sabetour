@@ -13,14 +13,25 @@
 //!   ...    header words preserved verbatim to dir_start
 //! DIRECTORY  (0x20 when flags != 0x3C, else 0x44) — 24-byte records:
 //!   +0x00 u32 hash        per-sub-asset hash; 0 => section-boundary placeholder (no bytes)
-//!   +0x04 u32 offset      running blob offset; chains offset[i] = offset[i-1] + comp[i-1]
+//!   +0x04 u32 offset      running blob offset, RELATIVE to a base (object: dir_end; streamblock: 0)
+//!                         — never an absolute file offset. Chains offset[i] = offset[i-1] + comp[i-1]
 //!   +0x08 u32 comp        stored (zlib) blob length
 //!   +0x0C u32 uncomp      decompressed length
 //!   +0x10 u32 f4          flags/lod
 //!   +0x14 u32 f5          aux
 //!   Directory ends at the first record whose `offset` != the running cursor.
-//! BODY  span = sum(comp of real records); placed "abs" (first >= dir_end) or "tail" (at EOF).
+//! BODY  span = sum(comp of real records); placed "middle" (first >= dir_end → blob_base =
+//!       dir_end + first, with a `first`-byte MIDDLE block between directory and blobs) or
+//!       "tail" (at EOF - span).
 //! ```
+//!
+//! ⚠️ `offset` is dir_end-RELATIVE. Treating it as absolute (blob_base = first) is wrong by exactly
+//! `dir_end` and yields a phantom trailing region of that same size. A parse→rebuild round-trip
+//! cannot detect the error — it relays regions verbatim — but any consumer that *slices* blobs by
+//! `blob_base` reads the wrong bytes, and any splice corrupts the preceding asset. Verified over
+//! every ALBS sub-pack in Dynamic0 + Palettes0 + Mega0 + Start0 + BelleStart0: for the object
+//! variant, `dir_end + first + span == fileSize` exactly in 1080 of 1137 packs (the rest have a
+//! genuine small footer). Corrected 2026-07-24; see `tools/sab_sbla/README.md`.
 
 fn u32le(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
@@ -50,9 +61,10 @@ impl Record {
 /// Where the concatenated blob region sits relative to the directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Model {
-    /// `offset` fields are absolute file offsets; blobs begin at `first` (== header aux0).
-    Abs,
-    /// `offset` fields are blob-relative; blobs are stored at the end of the file.
+    /// Object variant: `offset` is relative to `dir_end`, so blobs begin at `dir_end + first`
+    /// with a `first`-byte MIDDLE block (the uncompressed MSHA/DTEX descriptors) in between.
+    Middle,
+    /// Streamblock variant: `offset` is blob-relative (`first == 0`); blobs sit at the end of file.
     Tail,
 }
 
@@ -118,8 +130,10 @@ pub fn parse(buf: &[u8]) -> Result<Sbla, String> {
     }
     let dir_end = o;
     let span = cursor.wrapping_sub(first);
+    // `offset` is relative to dir_end for the object variant (see the ⚠️ note at the top of this
+    // module) — reading it as absolute puts every blob dir_end bytes early.
     let (model, blob_base) = if first as usize >= dir_end {
-        (Model::Abs, first as usize)
+        (Model::Middle, dir_end.checked_add(first as usize).ok_or("dir_end + first overflows")?)
     } else {
         (Model::Tail, size.checked_sub(span as usize).ok_or("span > file size")?)
     };

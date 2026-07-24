@@ -6,8 +6,9 @@ dependency; every format claim behind them is validated against retail data and,
 against the disassembled engine loader.
 
 **Download:** the [Releases](../../../../releases) page.
-`saboteur-modding-tools-<version>-win64.zip` has everything; `sab_workshop-<version>-win64.zip` is
-just the GUI. These ship **no game data** — you need your own copy of the game.
+`saboteur-modding-tools-<version>-win64.zip` has every shipped tool (see "Not shipped" below);
+`sab_workshop-<version>-win64.zip` is just the GUI. These ship **no game data** — you need your own
+copy of the game.
 
 Every tool prints its usage when run with no arguments.
 
@@ -47,7 +48,7 @@ Every tool prints its usage when run with no arguments.
 | [`sab_skeleton`](../../tools/sab_skeleton/README.md) | Extract a character skeleton (bone hierarchy + bind pose) from a MESH. |
 | [`sab_havok65`](../../tools/sab_havok65/README.md) | Decode Havok 6.5 spline-compressed animation → glTF. Decodes all 2,214 retail clips. |
 | [`sab_animmeta`](../../tools/sab_animmeta/README.md) | The `ANIM` track→bone binding that rigs a decoded clip onto a named skeleton. |
-| `saboteur_audio` | 1KCP Wwise package → `.wem` → WAV. Pipeline documented in [`docs/formats/audio_1kcp.md`](../formats/audio_1kcp.md). |
+| `saboteur_audio` | 1KCP Wwise package → `.wem` → WAV. Pipeline documented in [`docs/formats/audio_1kcp.md`](../formats/audio_1kcp.md). **Not in the release bundle** — build it from source. |
 
 ### Inspection
 
@@ -58,7 +59,10 @@ Every tool prints its usage when run with no arguments.
 | [`sab_asi`](../../tools/sab_asi/README.md) | 32-bit DLL injected into a running `Saboteur.exe`; reads live engine state without a debugger. |
 
 Not shipped: `sab_formats` (the shared codec library the others are built on), `sab_poc` and
-`sab_megapack_key` (one-shot proofs, not workflow tools).
+`sab_megapack_key` (one-shot proofs, not workflow tools), and `saboteur_audio` *(added 2026-07-24 —
+the release job discovers crates with a `tools/sab_*` glob, which `saboteur_audio` does not match, so
+it is excluded even though it is not on the workflow's explicit skip list)*. Build those from source:
+`cargo build --release --manifest-path tools/<crate>/Cargo.toml`.
 
 ## Ground rules
 

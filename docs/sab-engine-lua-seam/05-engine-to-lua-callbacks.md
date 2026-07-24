@@ -13,12 +13,24 @@ and `Vehicle.SetDeathCallback(h, "OnDeath", self, {...})` are the *same mechanis
 
 Three further results fall out of the registration machinery, all byte-level:
 
-1. Every binding is a `LuaGlueFunctor0<&F>` where `F` is `void __cdecl F(lua_State*)`. The generated
-   thunk hardcodes `return 1`, so **every binding returns exactly one result to Lua, always**.
+1. ⚠️ **CORRECTED 2026-07-24 — true for 722 of 898, not all.** ~~Every binding is a
+   `LuaGlueFunctor0<&F>` … so **every binding returns exactly one result to Lua, always**.~~
+   **176 of the 898 are `LuaGlueFunctor0R`** (`int F(lua_State*)`), whose thunk is a bare `jmp` with
+   no `mov eax,1` anywhere — the implementation's own `eax` becomes the Lua result count, so those
+   bindings *can* vary it (typically 0 or 1). Counted from the retail image:
+   `?$LuaGlueFunctor0@` = 722, `?$LuaGlueFunctor0R@` = 176, `.?AVLuaGlueFunctor@@` = 1 → 899
+   descriptors; and `data/lua_registration_map.tsv` gives the same 722/176 split with
+   `nresults` = `1` (709) / `eax` (172) / blank (17).
+   Example: `Util.GetHandleByName`'s thunk at `0x0075d460` is `e9 cb b6 ff ff` = `jmp 0x00758b30`,
+   and `FUN_00758b30` returns `0` on bad args, `1` after pushing.
+   The hardcoded-`return 1` description is correct **only** for the 722 `LuaGlueFunctor0` bindings —
+   see [`00-seam-overview.md`](00-seam-overview.md) §8.1, which adjudicated this.
 2. The registration code is **not in the decompile** — it is the un-recovered region the project notes
    flagged as an anomaly. It is plain code, and it is walkable directly from the PE.
 3. The C++ symbol names in [`data/lua_bindings.txt`](../../data/lua_bindings.txt) are **not** the
-   Lua-visible names. The mapping is not derivable from the symbol; it must come from the corpus.
+   Lua-visible names. The mapping is not derivable from the symbol — but ⚠️ **it does not have to come
+   from the corpus** (corrected 2026-07-24): the Lua name is a plain `.rdata` string in each
+   registration stanza, and all 898 are tabulated in `data/lua_registration_map.tsv`. Use that.
 
 Scope note: 64 callback-registration bindings, 58 resolved to a body VA; the ABI below is derived from
 `SetDeathCallback` / `ClearDeathCallback` / `BroadcastFunction`, verified against the Lua corpus.
@@ -277,7 +289,10 @@ reliable oracle:
 
 So: **where a C++ prefix exists it is a hint, sometimes abbreviated (`Trig`->`Trigger`, `WSTrain`->`Train`);
 where it is absent the binding is still namespaced.** The prefix is a C++ symbol-collision workaround, not
-the namespace. Only the corpus is authoritative for the Lua-visible name.
+the namespace. ⚠️ **Corrected 2026-07-24:** the corpus is *not* the only authority — the binary is.
+Each registration stanza stores the Lua name as an `.rdata` C string (twice), so
+`data/lua_registration_map.tsv` gives the authoritative name for all 898, including the ones the
+corpus never calls.
 
 One further irregularity: C++ `TrainRegisterTrainDecoupledCallback` registers the string
 `TrainRegisterDecoupledCallback` — the difference is an *infix*, not a prefix, so even suffix-matching

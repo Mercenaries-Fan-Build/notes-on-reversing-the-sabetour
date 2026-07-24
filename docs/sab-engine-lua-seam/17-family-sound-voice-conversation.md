@@ -58,6 +58,13 @@ omitting them would leave that misreading uncorrected rather than fixed.
 > Of those 10 bodyless rows, **8 are inferred** from corpus evidence and **2 remain fully open**
 > (`Cin.SetSpeakerWeight`, `Cin.GetHumanConversationID` — no body, no call site, no string).
 > The `LoudSpeakers` pair moved open → inferred on verification (see their rows).
+>
+> ⚠️ **Superseded 2026-07-24.** "Absent from the *decomp export*" was never the same as "absent from the
+> *exe*", and this doc took a year to notice. Raw capstone disassembly of retail `Saboteur.exe` closes
+> **8 of the 10**: all six `Sound.*Chatter`/`*LoudSpeakers` toggles, plus `Cin.SubtitlesOn` and
+> `Cin.SetSpeakerWeight`. Current tally: **36 confirmed from a body** (28 decomp + 8 raw disassembly),
+> **1 inferred** (`Cin.IsHumanInConversation`), **1 open** (`Cin.GetHumanConversationID`). Nothing in this
+> family is "fully open" any more.
 
 Two things deserve emphasis, because they cut against the method the assignment prescribes:
 
@@ -79,6 +86,13 @@ hole in Ghidra's function discovery. This correlates with — but is **not expla
 and `jmp` shapes in the tsv: `Sound.AttachSoundEvent` and `Sound.PlayOwnerlessSoundEvent` are `jmp`-shape
 too and *are* exported. Their signatures below come from the Lua corpus only, and are marked accordingly.
 This is an **open** item, recorded rather than papered over.
+
+⚠️ *(corrected 2026-07-24)* — **the last two sentences were the mistake.** The decomp export is not the
+only instrument available; the sibling docs in this series
+([19](19-family-ui-hud-tutorial.md), [23](23-family-render-weather-fx.md)) read bodies straight out of
+retail `Saboteur.exe` with capstone (`.text`: file offset = `VA - 0x400E00`), and every one of these
+addresses disassembles cleanly in a few instructions. Eight of the ten are now transcribed below from the
+exe. The Ghidra hole is real, but it was never a reason to leave a signature open.
 
 ---
 
@@ -125,24 +139,86 @@ actor map. Every `Sound.*` binding that takes a handle uses this map. Emitters a
 | `PlayMusicStab` | `Sound.PlayMusicStab` | `0x00743e30` | `(sStab) -> ()` | confirmed | Body: `FUN_006f7160(1)` → `FUN_00db7e10` → `FUN_00910fb0`. Corpus: `Sound.PlayMusicStab("Success_Stab")` (only distinct argument in the corpus) |
 | `SetParam` | `Sound.SetParam` | `0x00744070` | `(sParam, fValue) -> ()` | confirmed (body); **no corpus use** | Body: `FUN_006f6970() == 2` **exactly**, `FUN_006f7160(1)`, `FUN_006f7140(2)`→`FUN_006f7950(2)` → **`FUN_00918460(name, float, 0xffffffff)` = `SetRTPCValue` by name** ([sound.md](../symbol_map/sound.md)). `0xffffffff` = "all game objects" |
 | `SetTimedParam` | `Sound.SetTimedParam` | `0x00744120` | `(sParam, f2, f3, f4, f5) -> ()` | confirmed (body); **no corpus use** | Body: `FUN_006f6970() == 5` **exactly**; `FUN_006f7160(1)` + `FUN_006f7140(2..5)` → `FUN_00918be0(name, f,f,f,f, 0xffffffff)`. The four floats' roles (value / duration / curve / delay?) are **open** |
-| `SetState` | `Sound.SetState` | `0x00743fc0` | `(sGroup, sState) -> ()` | confirmed (body); **no corpus use** | Body: `FUN_006f6970() == 2` exactly, `FUN_006f7160(1)`+`FUN_006f7160(2)` → **`FUN_00918540` = `SetState`** ([sound.md](../symbol_map/sound.md)). Beware: every `SetState` hit in the Lua corpus is `Suspicion.SetState`, a different binding |
+| `SetState` | `Sound.SetState` | `0x00743fc0` | `(sGroup, sState) -> ()` | confirmed (body); **no corpus use** | Body: `FUN_006f6970() == 2` exactly, `FUN_006f7160(1)`+`FUN_006f7160(2)` → **`FUN_00918540` = `SetState`** ([sound.md](../symbol_map/sound.md)). Beware: every `SetState` hit in the Lua corpus is `Suspicion.SetState`, which *(corrected 2026-07-24)* is **not a binding at all** — see below |
 
-### `Sound` — the six toggles (bodies absent)
+### `Sound` — the six toggles (**disassembled 2026-07-24**)
+
+⚠️ *(corrected 2026-07-24)* — this section previously read "bodies absent … *inferred:* each is a
+one-instruction global flag write". All six were disassembled out of retail `Saboteur.exe`. Every row below
+is now **confirmed**, and three of the old claims were wrong: they are **3–4 instructions**, not one; they
+write **two different globals**, not one homogeneous block; and the "hole" at `0x00744e60` is not a hole.
 
 | Binding | Namespaced form | VA | Signature | Confidence | Evidence |
 |---|---|---|---|---|---|
-| `EnableSeanChatter` | `Sound.EnableSeanChatter` | `0x00744e20` | `() -> ()` | inferred | No body in decomp. Corpus calls it with **no arguments** |
-| `DisableSeanChatter` | `Sound.DisableSeanChatter` | `0x00744e10` | `() -> ()` | inferred | ditto |
-| `EnableAllChatter` | `Sound.EnableAllChatter` | `0x00744e40` | `() -> ()` | inferred | ditto. **tsv anomaly:** this is the only row of 898 with an *empty* `nresults` |
-| `DisableAllChatter` | `Sound.DisableAllChatter` | `0x00744e30` | `() -> ()` | inferred | ditto |
-| `EnableLoudSpeakers` | `Sound.EnableLoudSpeakers` | `0x00744e50` | `() -> ()` | inferred | No body, and **no direct call site** — but referenced as a deferred action at `Managers/RewardsManager.lua:622`: `{ Sound.EnableLoudSpeakers, {} }`, a `(function, argsTable)` pair whose args table is **empty**. Positive evidence for zero arity |
-| `DisableLoudSpeakers` | `Sound.DisableLoudSpeakers` | `0x00744e70` | `() -> ()` | inferred | ditto, `Managers/RewardsManager.lua:275`: `{ Sound.DisableLoudSpeakers, {} }` |
+| `DisableSeanChatter` | `Sound.DisableSeanChatter` | `0x00744e10` | `() -> ()` | **confirmed** | exe: `[0x0143ee38] + 1 = 0` |
+| `EnableSeanChatter` | `Sound.EnableSeanChatter` | `0x00744e20` | `() -> ()` | **confirmed** | exe: `[0x0143ee38] + 1 = 1` |
+| `DisableAllChatter` | `Sound.DisableAllChatter` | `0x00744e30` | `() -> ()` | **confirmed** | exe: `[0x0143ee38] + 2 = 0` |
+| `EnableAllChatter` | `Sound.EnableAllChatter` | `0x00744e40` | `() -> ()` | **confirmed** | exe: `[0x0143ee38] + 2 = 1`. **tsv anomaly:** one of **17** rows of 898 with an *empty* `nresults` (doc 99 §4.5 gives the full tally `'1'`→709 / `'eax'`→172 / blank→17) — **the blank is now filled: the body sets `eax = 1`**, so the contract is `1*` like its siblings |
+| `EnableLoudSpeakers` | `Sound.EnableLoudSpeakers` | `0x00744e50` | `() -> ()` | **confirmed** | exe: `[0x01442960] + 0x17f = 1`. Corpus: deferred action at `Managers/RewardsManager.lua:622` `{ Sound.EnableLoudSpeakers, {} }` — empty args table, matching the zero arity the body proves |
+| `DisableLoudSpeakers` | `Sound.DisableLoudSpeakers` | `0x00744e70` | `() -> ()` | **confirmed** | exe: `[0x01442960] + 0x17f = 0`. Corpus: `Managers/RewardsManager.lua:275` `{ Sound.DisableLoudSpeakers, {} }` |
 
-The six sit on a 0x10-byte stride across the span `0x00744e10`–`0x00744e70` in strict
-disable/enable/disable/enable/enable/disable pairing order, all `inlined` shape with
-`thunk_va == impl_va`. The stride has one hole: `0x00744e60` is claimed by no row in the tsv, so the block
-is evenly spaced but not quite contiguous. *Inferred:* each is a one-instruction global flag write, which is why they were
-inlined into their own thunks and why Ghidra never promoted them to functions.
+The bodies in full (file offset = `VA - 0x400E00`):
+
+```asm
+; --- chatter: global [0x0143ee38], bytes +1 (Sean) and +2 (all) ---
+00744e10 DisableSeanChatter   a1 38ee4301        mov  eax, [0x0143ee38]
+00744e15                      c6 40 01 00        mov  byte [eax+1], 0
+00744e19                      b8 01000000        mov  eax, 1
+00744e1e                      c3                 ret                      ; 15 bytes
+
+00744e20 EnableSeanChatter    8b0d 38ee4301      mov  ecx, [0x0143ee38]
+00744e26                      b8 01000000        mov  eax, 1
+00744e2b                      88 41 01           mov  byte [ecx+1], al
+00744e2e                      c3                 ret                      ; 15 bytes
+
+00744e30 DisableAllChatter    a1 38ee4301        mov  eax, [0x0143ee38]
+00744e35                      c6 40 02 00        mov  byte [eax+2], 0
+00744e39                      b8 01000000        mov  eax, 1
+00744e3e                      c3                 ret                      ; 15 bytes
+
+00744e40 EnableAllChatter     8b0d 38ee4301      mov  ecx, [0x0143ee38]
+00744e46                      b8 01000000        mov  eax, 1
+00744e4b                      88 41 02           mov  byte [ecx+2], al
+00744e4e                      c3                 ret                      ; 15 bytes
+
+; --- loudspeakers: a DIFFERENT global [0x01442960], byte +0x17f ---
+00744e50 EnableLoudSpeakers   8b0d 60294401      mov  ecx, [0x01442960]
+00744e56                      b8 01000000        mov  eax, 1
+00744e5b                      88 81 7f010000     mov  byte [ecx+0x17f], al
+00744e61                      c3                 ret                      ; 18 bytes -> 0x00744e61
+
+00744e70 DisableLoudSpeakers  a1 60294401        mov  eax, [0x01442960]
+00744e75                      c6 80 7f010000 00  mov  byte [eax+0x17f], 0
+00744e7c                      b8 01000000        mov  eax, 1
+00744e81                      c3                 ret                      ; 18 bytes
+```
+
+Three things fall out, and each replaces a wrong statement that stood here before:
+
+**They are not one instruction.** Each is a global load, a byte store, `mov eax,1`, `ret`. `nresults = 1`
+is therefore *directly observed* for all six, not assumed from the shape rule — which matters for
+`EnableAllChatter`, whose tsv `nresults` cell is blank. Note the peephole the enable variants use: `eax`
+is set to `1` *before* the store so that the same register serves as both the stored byte (`al`) and the
+Lua result count. The disable variants can't do that (they store `0`) and so order the two writes the
+other way round. `Render.ResumeUVScrolling` @`0x0073ff10` uses the identical `mov eax,1` / `mov [ecx+off],al`
+idiom — it is a compiler pattern for this whole class of inlined setter, not a quirk of the `Sound` table.
+
+**This is not one homogeneous block — it is two subsystems.** The chatter four write **`[0x0143ee38]`**
+(bytes `+1` and `+2`); the loudspeaker pair write **`[0x01442960]`** (byte `+0x17f`). Reading the six as a
+single evenly-spaced flag block, as this doc did, conflated an ambient-VO gate with something else entirely
+— `+0x17f` deep inside a much larger object, against a singleton that is *not* the one the chatter flags
+live in. The `Chatter` grouping in the "what the family says" section below is sound; extending it over the
+`LoudSpeakers` pair was not.
+
+**There is no hole at `0x00744e60`.** The old text called `0x00744e60` "claimed by no row in the tsv", as if
+a seventh toggle had been cut. `EnableLoudSpeakers` is **18 bytes** — the 6-byte absolute load and the
+6-byte displaced store push it to `0x00744e61`, i.e. it simply spills past `0x00744e60`, and the next
+16-byte-aligned slot is `0x00744e70`. The bytes between `0x00744e62` and `0x00744e6f` are `cc` alignment
+padding. The "0x10 stride" was never a stride; it is `/ALIGN`-driven function packing, and the one place a
+function exceeded 16 bytes it took two slots.
+
+What the flags *mean* on the engine side (which object `[0x0143ee38]` is, what else reads `+1`/`+2`) is
+still open — but the Lua-side contract is now closed.
 
 ### `Cin` — conversation
 
@@ -155,8 +231,8 @@ inlined into their own thunks and why Ghidra never promoted them to functions.
 | `ConversationConditionPassed` | `Cin.ConversationConditionPassed` | `0x0071c790` | `(nConvID, bPassed) -> ()` | confirmed | Body: `FUN_006f7140(1)` + `FUN_006f7120(2)` → `FUN_00956980(int, bool)`. **Note the fetch order is inverted vs. the check order** (`FUN_006f6e60(2)` runs before `FUN_006f7990(1)`) — harmless, both are pure. Corpus: `Includes/__UtilFunctions.lua:369` `Cin.ConversationConditionPassed(ConversationID, bCompleted)` |
 | `IsHumanInConversation` | `Cin.IsHumanInConversation` | `0x0071cb20` | `(hHuman) -> bool` | inferred | **Body absent from decomp.** `LuaGlueFunctor0R`/`jmp` ⇒ real result count. Corpus is unambiguous: `Missions/Act_1_GetCaught.lua:556,1177,1543` all `Cin.IsHumanInConversation(hSab)` in boolean position |
 | `GetHumanConversationID` | `Cin.GetHumanConversationID` | `0x0071cc00` | `(hHuman) -> nConvID` *(presumed)* | **open** | **Body absent from decomp AND zero corpus call sites.** Name + `LuaGlueFunctor0R` is all the evidence there is. The `nConvID` it presumably returns is the integer `StopConversation`/`InterruptConversation`/`ConversationConditionPassed` accept — that pairing is the only reason to believe the shape |
-| `SetSpeakerWeight` | `Cin.SetSpeakerWeight` | `0x0071ea30` | unknown | **open** | Body absent (`inlined`); zero corpus call sites. Nothing but the name is known |
-| `SubtitlesOn` | `Cin.SubtitlesOn` | `0x0071e950` | `(bOn) -> ()` | inferred | Body absent (`inlined`). Corpus: `Cin.SubtitlesOn(true)` / `Cin.SubtitlesOn(false)` — both literals appear |
+| `SetSpeakerWeight` | `Cin.SetSpeakerWeight` | `0x0071ea30` | `(…) -> ()` — **SHIPPED STUB** | **confirmed — retail stub** | exe @`0x0071ea30`: the whole function is `b8 01 00 00 00 c3` = `mov eax,1; ret`. Six bytes. Reads no argument, touches no state. See below |
+| `SubtitlesOn` | `Cin.SubtitlesOn` | `0x0071e950` | `(bOn) -> ()` — **SHIPPED STUB, `bOn` ignored** | **confirmed — retail stub** | exe @`0x0071e950`: `b8 01 00 00 00 c3` = `mov eax,1; ret`, identically. Corpus: `Cin.SubtitlesOn(true)` / `Cin.SubtitlesOn(false)` both appear — **and neither does anything**. See below |
 
 ### `Cin` — music override
 
@@ -260,6 +336,38 @@ kills the whole conversation, silently.** Contrast `PlayConversation`, which has
 this way. Mission scripts guard for this: `Missions/Act_1_BarFight.lua:830` re-checks `hDude` before
 `Cin.PlayConversationWith("A1M2_NaziFightChatter", {hDude})`.
 
+### Two of this family's `Cin` bindings are shipped stubs
+
+⚠️ *(added 2026-07-24 — established in [18](18-family-cinematics-camera-face.md) and
+[19](19-family-ui-hud-tutorial.md) and never picked up here.)*
+
+`Cin.SubtitlesOn` (`0x0071e950`) and `Cin.SetSpeakerWeight` (`0x0071ea30`) are, byte for byte, the same
+six-byte function:
+
+```asm
+0071e950  b8 01 00 00 00   mov  eax, 1
+0071e955  c3               ret
+```
+
+No stack read, no state write, no callee. They are registered, callable, and inert.
+[Doc 18](18-family-cinematics-camera-face.md) tabulates both in its sweep of `inlined` siblings in the same
+registration block (alongside `Cin.SetCinematicStreaming`, `Cin.DEBUGTeleportToLocator`,
+`FocusPt.SetTexture`) and **explicitly flags `Cin.SubtitlesOn` for "the conversation/dialogue family rather
+than claimed"** — that is this document, which then left it marked *inferred* for a year.
+[Doc 19](19-family-ui-hud-tutorial.md) repeats the finding in its own `Cin.*` text table.
+
+The gameplay consequence is worth stating plainly: **`SubtitlesOn(bOn)` ignores `bOn`. Subtitles cannot be
+toggled from script.** Whatever subtitle policy retail has is fixed outside the Lua seam, and the corpus
+calls that appear to set it — `Cin.SubtitlesOn(true)` / `Cin.SubtitlesOn(false)` in `P1FP_Traitor.lua` —
+are dead lines. This joins the three type-mismatch `Sound.*` calls above as shipped script that does
+nothing, but for a different reason: those fail the marshalling type check, these reach a binding with
+nothing behind it.
+
+`SetSpeakerWeight` being a stub also settles what its *arguments* are: nothing observable, because the
+binding never asks for any. It cannot be typed from the body, and with zero call sites it cannot be typed
+at all. It was designed against the `"Speaker%d"` role model above — that much the name supports — but no
+weighting logic shipped.
+
 ### Conversations have two identities, and callbacks are strings
 
 `StopConversation` and `InterruptConversation` each dispatch on arg 1's *type*: a string routes to one
@@ -324,6 +432,33 @@ these two — **the Lua bindings do not support that**; they reach `FUN_00898a30
 **`Sound.SetState` is not the `SetState` in your grep results.** Every `SetState(` hit in the Lua corpus is
 `Suspicion.SetState`. `Sound.SetState` has zero call sites.
 
+⚠️ *(corrected 2026-07-24)* — this doc twice called `Suspicion.SetState` "**a different binding**". It is
+not a binding. It is **unregistered**, and every one of those calls is broken:
+
+- The `Suspicion` table has **34 rows** in [`lua_registration_map.tsv`](../../data/lua_registration_map.tsv)
+  and **none of them is `SetState`**. Filtering the whole 898-row map for `lua_name == "SetState"` returns
+  exactly one row: `Sound.SetState` `0x00743fc0` — the binding documented above.
+- It is not a Lua-side wrapper either: `grep -rn "function Suspicion\.\|Suspicion *= *{"` across all 321
+  corpus files returns **nothing**. There is no `WRAPPER_Suspicion.lua` and no table literal defining one.
+- So `Suspicion.SetState` indexes a real table with a key that is nil, and calling it raises
+  **"attempt to call nil"** at runtime.
+
+There are **12** such call sites, not the handful the phrasing implied: 11 under
+[`Experimental/`](../saboteur-luacd/src/Experimental/) (`SoldierState_Combat.lua:26`,
+`SoldierState_Hunt.lua:30,43`, `SoldierState_Investigate.lua:29`,
+`SoldierState_InvestigateThreat.lua:7,30`, `SoldierState_PaperCheckBackup.lua:32`,
+`SoldierState_PaperCheckLeader.lua:40,342`, `Soldier_Callbacks.lua:69`, `Soldier_Internal.lua:19`) and
+**one live** at
+[`Modules/Libraries/ScriptSequence.lua:704`](../saboteur-luacd/src/Modules/Libraries/ScriptSequence.lua).
+The `Experimental/` eleven are a dev-only soldier FSM; the `ScriptSequence` one is in a shipped library,
+reachable from any sequence issuing that command.
+
+This is the same pattern [doc 20](20-family-inventory-perks-shop.md) documents for **`Actor.AddToShop`**
+— called from corpus script, absent from the registration map, undefined anywhere in the corpus, therefore
+not a binding — and doc 20 did that diligence correctly where this doc guessed. The lesson generalises: a
+`Table.Name(` hit in the corpus is evidence of an *author's intent*, never of a *registered binding*.
+Check the map.
+
 ### A correction to `sound.md`
 
 [`sound.md`](../symbol_map/sound.md)'s "Bank management" heading calls `DAT_01442928` the
@@ -369,7 +504,10 @@ unfinished feature — and it is a caution against reading "zero call sites" as 
 The `Chatter` toggles are the tell for the ambient-VO design. There is a **Sean-specific** channel
 (`EnableSeanChatter`/`DisableSeanChatter`) separate from **all** chatter — the player character's barks were
 important enough to gate independently, presumably to silence him during cinematics and scripted VO without
-killing world ambience. `Util.SetLastMissionChatter` writing a single global string into save state
+killing world ambience. *(2026-07-24: the disassembly backs this up structurally — the two channels are
+**adjacent bytes in one object**, `[0x0143ee38] + 1` for Sean and `+ 2` for all, i.e. one VO-policy struct
+with a per-channel flag array. The `LoudSpeakers` pair, by contrast, writes an entirely different global and
+does not belong to this design at all.)* `Util.SetLastMissionChatter` writing a single global string into save state
 (`DAT_01240328 + 0x220c`, fed from `SabTask._tMiscSaveTable.LastMissionChatter`) suggests a
 "remember what he last commented on" anti-repeat mechanism that survives reload.
 
@@ -390,14 +528,18 @@ for the conversation only.
 
 ## Open questions
 
-1. **Ten missing bodies.** `0x00744e10`–`0x00744e70`, `0x0071ea30`, `0x0071e950`, `0x0071cb20`, `0x0071cc00`
-   have no decomp record while `jmp`-shape siblings at `0x007438f0`/`0x007439e0` do. Is this a Ghidra
-   analysis gap or a real difference in how these were emitted? A raw disassembly of those ~0x60 bytes would
-   settle all six toggles at once — and they are almost certainly trivial.
-2. **`Cin.SetSpeakerWeight` is completely dark** — no body, no call site, no string. Given `"Speaker%d"`,
-   *inferred:* it biases which speaker a conversation prefers, or their audio prominence. Pure speculation.
-   It and `Cin.GetHumanConversationID` are the only two rows in the family with **no evidence of any kind**
-   beyond their registration entry.
+1. ~~**Ten missing bodies.** … A raw disassembly of those ~0x60 bytes would settle all six toggles at
+   once — and they are almost certainly trivial.~~ — **retired 2026-07-24 ✅.** The disassembly was done
+   (see [the six toggles](#sound--the-six-toggles-disassembled-2026-07-24)); it took minutes. Eight of the
+   ten bodies are now transcribed; the answer to "Ghidra gap or real difference?" is **Ghidra gap** — the
+   code is ordinary and present. Only `Cin.IsHumanInConversation` (`0x0071cb20`) and
+   `Cin.GetHumanConversationID` (`0x0071cc00`) remain untranscribed, and nothing prevents that either.
+2. ~~**`Cin.SetSpeakerWeight` is completely dark** — no body, no call site, no string.~~ — **deleted
+   2026-07-24 ✅.** It is not dark: it is a **six-byte shipped stub** (`mov eax,1; ret`), as
+   [18](18-family-cinematics-camera-face.md) and [19](19-family-ui-hud-tutorial.md) had already recorded.
+   The speculation about speaker biasing is retracted — there is no logic to speculate about.
+   `Cin.GetHumanConversationID` is now the family's **only** row with no evidence beyond its registration
+   entry.
 3. **The `ReleaseSoundBank` / `UnloadSoundBank` flag.** Both call `FUN_00913df0`; the 4th argument is
    Lua-controlled (inverted) in one and hardcoded `1` in the other. What does it select? And why does
    `ReleaseSoundBank` skip the `+0x11dc` engine-ready gate that `UnloadSoundBank` checks?

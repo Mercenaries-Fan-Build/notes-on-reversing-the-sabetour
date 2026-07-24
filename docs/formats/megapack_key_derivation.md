@@ -18,8 +18,8 @@
 **Question:** exactly what string does the engine hash to produce a `.megapack` (MP00) entry's
 lookup key, so a modder can register a *new* asset the engine will find by-hash?
 
-**Answer (CONFIRMED — reproduces all 759 `Global\Dynamic0.megapack` keys and 274 `Palettes0`
-keys from the string alone):**
+**Answer (CONFIRMED — reproduces all 759 `Global\Dynamic0.megapack` keys, and 274 of `Palettes0`'s
+321 entries — those resolvable via the rainbow table — from the string alone):**
 
 ```
 entry (20 bytes on disk) = { u32 path_crc; u32 name_crc; u32 size; u64 offset }
@@ -53,8 +53,10 @@ keys — the smoking gun that the key is not the mesh/leaf name:
 
 Run the Rust proof: `cargo run -p sab_megapack_key -- "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack"`
 → reproduces both u32s from the name and confirms each derived key is a real entry pointing at an `ALBS`
-block. Bulk check (Python, against SabTool's `Hashes.txt` rainbow table): **759/759** Dynamic0 and
-**274/274** resolvable Palettes0 entries match.
+block. Bulk check (Python, against SabTool's `Hashes.txt` rainbow table): **759/759** Dynamic0 entries and
+**274 of Palettes0's 321** entries match — 274 is the count whose names the rainbow table resolves, not
+the pack's entry count. *(clarified 2026-07-24: `Global\Palettes0.megapack` declares 321 entries; the
+remaining 47 are unverified only because their names are unknown.)*
 
 ## The decompilation chain (VAs)
 
@@ -85,7 +87,12 @@ binary.
 3. In your `patchdynamic0.megapack`, write the index entry with:
    * `path_crc = pandemic_hash("global\\MyMod_Crate.dynpack")`
    * `name_crc = pandemic_hash("MyMod_Crate")`
-   * `size`, `offset` of your block; keep entries sorted by `path_crc` (engine bsearches).
+   * `size`, `offset` of your block. **On-disk entry order is free** — the loader `FUN_00e428c0`
+     `_qsort`s the table in memory after reading it (`_qsort(param_1[0xf0], param_1[0xf1], 0x18,
+     &LAB_00e42610)`) and only then does `FUN_00e42740` bsearch it. *(corrected 2026-07-24: this
+     previously said "keep entries sorted by `path_crc` (engine bsearches)"; neither retail
+     `Dynamic0.megapack` nor `Palettes0.megapack` is sorted by `path_crc` on disk — 381/758 and
+     167/320 adjacent pairs respectively are descending.)*
    Also emit the second `(path_crc, name_crc)` back-table.
 4. Drop it next to `Global\Dynamic0.megapack`. The engine mounts `patchdynamic0.megapack` at ~1000×
    priority, so any request for `global\MyMod_Crate.dynpack` resolves to your block.
@@ -100,7 +107,7 @@ struct field just happens to be named "index" in earlier notes.
 | Claim | Status |
 |---|---|
 | `path_crc = pandemic_hash("global\\"+name+".dynpack")` for `Global\Dynamic0` | **CONFIRMED — 759/759 real crcs reproduced** |
-| `path_crc = pandemic_hash("global\\"+name+".palettepack")` for `Global\Palettes0` | **CONFIRMED — 274/274 resolvable reproduced** |
+| `path_crc = pandemic_hash("global\\"+name+".palettepack")` for `Global\Palettes0` | **CONFIRMED — 274 of the pack's 321 entries reproduced** (the 274 whose names the rainbow table resolves; 0 mismatches) |
 | `name_crc = pandemic_hash(name)` | **CONFIRMED — 759/759** |
 | `pandemic_hash == FUN_00dc1e20` (FNV-1a/32 + case-fold + finalizer) | **CONFIRMED** (bytes + `"ANY"` vector) |
 | On-disk entry = `{path_crc,name_crc,size,offset}` 20 bytes, key=path_crc | **CONFIRMED** (loader `FUN_00e428c0`, comparator `FUN_00e42740`) |

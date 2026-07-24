@@ -16,8 +16,16 @@ or assets. Never copy a Mercs 2 offset, struct, or hash into a Saboteur doc with
 
 ## Ground truth, in priority order
 
-1. **The clean decomp** — `output/_ghidra_saboteur/saboteur_all_functions_decomp.txt` (36,935 fns,
-   local/regenerable). The exe is unpacked, so the decomp is authoritative for engine behavior. Grep it.
+1. **The clean decomp** — ⚠️ **it lives in the SIBLING repo, not this one:**
+   `C:/Users/Shadow/Desktop/notes-on-the-released-game/output/_ghidra_saboteur/saboteur_all_functions_decomp.txt`
+   (54 MB, 36,935 entries — 35,819 `FUN_*` plus 1,116 demangled/synthetic names; local/regenerable).
+   There is **no** `output/_ghidra_saboteur/` under this repo; the old relative path here sent every
+   agent looking in the wrong place. The exe is unpacked, so the decomp is authoritative for engine
+   behavior. Grep it.
+   Two caveats worth knowing before you conclude "it isn't there": Ghidra drops some bodies as
+   *unreachable blocks* (e.g. the whole `GameText.dlg` record loop in `FUN_0095f370`), and a few
+   FPU-heavy functions are absent entirely (`FUN_00f22470`). When the decomp is silent, disassemble
+   `C:/GOG Games/The Saboteur/Saboteur.exe` directly — VA→file offset is `VA - 0x400E00` for `.text`.
 2. **RTTI / bindings** — `data/rtti_classes_all.txt`, `data/ws_engine_classes.txt`, `data/lua_bindings.txt`.
 3. **The retail install** — `C:\GOG Games\The Saboteur` (assets, `LuaScripts.luap`, `.pck`, megapacks).
 4. **SaboteurToolset** (PredatorCZ) & **SabTool** — community format prior art to cross-check, not to trust blindly.

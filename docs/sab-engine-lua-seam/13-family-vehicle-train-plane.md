@@ -99,7 +99,7 @@ unreadable: each is a short, complete function the exporter simply never emitted
 
 **1. 19 Train `impl_va`s point at incremental-link (ILT) jump stubs, not bodies.** The byte at those
 VAs is `E9` (`jmp rel32`). `TrainStart`'s `impl_va` is `0x0061f210`, whose five bytes are
-`e9 5b 6c 00 01` — i.e. `0x0061f210 + 5 + 0x00016c5b` = the real body at **`0x01625e70`**, out in the
+`e9 5b 6c 00 01` — i.e. `0x0061f210 + 5 + 0x01006c5b` = the real body at **`0x01625e70`**, out in the
 high `.text` range where the incrementally-linked code lives. Ghidra folds these stubs away, which is exactly
 why `FUN_0061f210` "doesn't exist" in the decomp. All 19 are Train; **zero** Vehicle or Util rows are
 stubbed. The `VA` column below gives the resolved body and notes the stub. Anyone grepping the decomp

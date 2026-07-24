@@ -131,7 +131,11 @@ MESH header:  BBOX, name(hash), numBones0, numBoneRemaps, numStreams, numPrimiti
 BoneRemaps[]  (if skinned)
 Streams[]     vertex/index buffer descriptors (offsets into companion .dat)
 Primitives[]  sub-mesh draw ranges (per-primitive BBOX)
-DrawCalls[]   { uint32 primitiveIndex; hash material; uint16 parentBone; uint16 unk; }
+DrawCalls[]   { uint32 primitiveIndex; hash material; uint32 0; uint16 parentBone; uint16 unk; }
+              -- 16 bytes each. (Corrected 2026-07-24: the u32 zero between `material` and
+              -- `parentBone` was missing here, making the record read as 12 bytes. The 16-byte
+              -- form is what mesh_geometry.md documents and is what makes Sean's tail cursor
+              -- land exactly on 36600/36600 with 0 leftover.)
 ```
 
 Stream descriptor: `{ numVertices, format, vbOffset, vbSize, vbStride, ibOffset, ibSize, faceType, numIndices }`.
@@ -153,6 +157,18 @@ with `constTag == 0x1B`. ~18 known codes, e.g.:
   files, not an inline chunk. LOD/damage-state handling not yet observed in the toolset (TBD).
 
 ## Status / next
-- Format documented; **no Rust reader written yet.** SaboteurToolset already converts MESH→glTF, so the
-  fastest validation is to run it against `Dynamic0.megapack` and confirm a character/vehicle extracts.
-- A native reader (Rust) would let us pair with our own pipeline and is a prerequisite for a writer.
+
+✅ **Superseded 2026-07-24.** This section used to say "no Rust reader written yet" and propose
+validating via SaboteurToolset. Both the readers **and** the writers now exist in this repo:
+
+| Layer | Tool | Notes |
+|---|---|---|
+| MP00 megapack | [`sab_pack`](../../tools/sab_pack/README.md) | list / extract / pack / roundtrip / **patch** |
+| ALBS sub-pack | [`sab_sbla`](../../tools/sab_sbla/README.md) | list / rebuild / **replace** / scan — byte-identical rebuild over 1042 sub-packs |
+| MESH / MSHA | [`sab_mesh`](../../tools/sab_mesh/README.md), [`sab_skeleton`](../../tools/sab_skeleton/README.md) | decode → glTF |
+| DTEX | [`sab_dtex`](../../tools/sab_dtex/README.md) | DTEX ⇄ DDS, 12,426/12,426 retail textures decode |
+| MAP6 | [`sab_map6`](../../tools/sab_map6/README.md) | |
+| shared codecs | `tools/sab_formats` | the library the others build on (no README yet — see the module docs in `src/`) |
+| mod audit | [`sab_validator`](../../tools/sab_validator/README.md) | parses a mod the way the engine's mount path does |
+
+Remaining genuine gap in *this* area: LOD/damage-state handling is still unobserved (noted above).

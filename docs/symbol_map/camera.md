@@ -21,7 +21,7 @@ RTTI reports ~21 camera classes (grep `Camera|Cam` in `data/ws_engine_classes.tx
   The inheritance is visible in the call graph: `FUN_0048e000` (Group) calls `FUN_0046e9c0` (base CameraSettings), and all three transition ctors call the base `FUN_00472970`.
 
 - **`WSGameCamera` runtime** clusters at `0x0067xxxx`:
-  - `FUN_00671ae0` — per-frame **Tick**; runs update `FUN_006732c0` then apply `FUN_00671b90`.
+  - `FUN_00671ae0` — per-frame **Tick**; runs update `FUN_006732c0`. ⚠️ **REFUTED 2026-07-24:** ~~then apply `FUN_00671b90`~~ — `FUN_00671b90` is **never called here** (it is not referenced anywhere in `FUN_00671ae0`'s body, and its own header lists `callers=[]`). `FUN_00671ae0` is a 5-case switch on `*(this+0x2c)`.
   - `FUN_00671b90` (2835) — **ApplySettings**; constructs a `WSCameraSettings` (`FUN_0046e9c0`) and blends transitions (`FUN_0067aee0`).
   - `FUN_006732c0` (4359) — **Update** leaf.
   - `FUN_0067aee0` (428) — shared **transition/settings blend**, also used by the slow-mo runtime.
@@ -30,7 +30,7 @@ RTTI reports ~21 camera classes (grep `Camera|Cam` in `data/ws_engine_classes.tx
 
 - **Slow-motion (bullet-time) camera**: `FUN_01631380` loads the `SlowMotionCamera_Default` blueprint (line 1760304) and applies it via `FUN_0067aee0`. Gameplay driver `FUN_0050c010` selects `SlowMotionCamera_Default` vs `SlowMotionCamera_Melee` (lines 152849/152852) for the kill-cam. Fronted by Lua `StartSlowMotionCamera`.
 
-- **Cinematics camera**: `FUN_0094cc50` / `FUN_0094cd80` carry the string anchors `WSCinematicsManager::StartCinematicsCamera` / `StopCinematicsCamera` (lines 782096/782142) and toggle the camera-active bit at object offset `+0x312`.
+- **Cinematics camera**: `FUN_0094cc50` / `FUN_0094cd80` carry the string anchors `WSCinematicsManager::StartCinematicsCamera` / `StopCinematicsCamera` (lines 782096/782142). ⚠️ **REFUTED 2026-07-24:** they do not ~~toggle~~ the camera-active bit at `+0x312` — **Start only *tests* it** (`& 0x20`), while **Stop clears it** (`& 0xdf`). Nothing here sets it; the setter is elsewhere.
 
 - **Camera collision job**: `FUN_009a57e0` registers the async job named `"CameraColJob"` (line 837622) with vtable `&PTR_PTR_011c58f8` into the job scheduler — RTTI `WSCameraCollisionJob` (camera-vs-world ray collision; see also `WSCameraRayCastCollector`).
 
@@ -41,7 +41,7 @@ From `data/lua_bindings.txt`: `CameraShakeExplosion` (exposed as `Render.CameraS
 Blueprint/`WSFactory` construction (`FUN_00461590`, `FUN_00db7e10` type interning); Cinematics (`WSCinematicsManager`, `WSCinemaElement`); the job scheduler (`CameraColJob` alongside `HavokStepJob`); audio (`Sound_Camera_Shake` -> `FUN_0091ae20`); player/combat (kill-cam slow-mo).
 
 ## Gaps
-- No RTTI vtable->VA map yet, so no camera **class vtable** is pinned to an address; `WSGameCamera`/`WSCameraSettings` identities are inferred from the `0x0067xxxx` cluster + the `Sound_Camera_Shake` string + the CameraSettings-ctor call, not from a vtable.
+- ✅ **The RTTI vtable→VA map now exists** ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv); `WSGameCamera` has 181 slots), but this doc predates it: the `WSGameCamera`/`WSCameraSettings` identities below are still inferred from the `0x0067xxxx` cluster + the `Sound_Camera_Shake` string + the CameraSettings-ctor call, not from a vtable. Re-deriving them from the map is the open task.
 - Lua binding **thunks** (`CameraShakeExplosion`, `StartSlowMotionCamera`, `FocusPt*`, `GetPointInViewOnRoad`) are `LuaGlueFunctor` wrappers and are **not** inline strings — only their downstream implementations are pinned, not the binding entry VAs.
 - Runtime (non-blueprint) classes are unpinned: `WSCameraSet`, `WSCameraRayCastCollector`, `WSSeatCameraSettings`, `WSShootingCameraSettings`, `WSCinemaCamera`, `WSCinemaCameraShake`, `WSCinemaSplineCamera`, `WSCinemaXSICamera`.
 - The `ScopeTransition` ctor (`FUN_00467020`) has no exact matching RTTI class name.

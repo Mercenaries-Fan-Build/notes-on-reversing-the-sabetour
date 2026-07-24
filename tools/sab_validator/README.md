@@ -55,13 +55,32 @@ gate a build" policy in one auditable place.
 
 ## Ground-truth oracle
 
-The validator is calibrated to **0 false positives on retail**. Auditing the shipped Global packs:
+The validator is calibrated to **0 false positives on the shipped `Global/` packs** — but *not* on
+every retail archive; see the `France/` row below.
 
 | Pack | sub-packs | textures | meshes | verdict |
 |------|-----------|----------|--------|---------|
 | `Dynamic0.megapack` | 759 | 8 980 | 6 807 | 0 fatal / 0 warn |
 | `Palettes0.megapack` | 321 | 3 579 | 50 | 0 fatal / 0 warn |
 | `patchdynamic0.megapack` | 1 | 29 | 8 | 0 fatal / 0 warn |
+| `France/Start0.kiloPack` | 12 | 498 | 441 | 0 fatal / 0 warn |
+| `France/BelleStart0.kiloPack` | 95 | 1 716 | 2 348 | ⚠️ **96 fatal** — see below |
+
+> ### ⚠️ Known false positives: `BelleStart0.kiloPack`
+>
+> Untouched retail data produces **96 fatals**, all from the single rule
+> `mesh.prim-tricount-mismatch`, concentrated in a handful of entries and overwhelmingly on
+> `France_Streamblock_*_baked_*` meshes (plus a few objects such as `OccLt_Main_NZFlag_D`). The
+> reported values are plainly garbage (`numIndices=432042701`, `tricount=973768353`), which points at
+> the *reader* slicing these blobs at the wrong place rather than at genuinely corrupt retail assets.
+>
+> Confirmed **pre-existing and independent of the 2026-07-24 `Model::Middle` correction** — an A/B
+> build with the old absolute base produces the identical 96. The prime suspect is the streamblock
+> (`flags=0x3C`) `Tail` placement, which is the one ALBS variant whose blob base is still unverified
+> (`sab_sbla replace` warns on it for the same reason).
+>
+> **Consequence:** on `France/` packs a FATAL is not automatically a real defect. On `Global/` packs
+> — which is where texture and character mods are built — the 0-false-positive calibration holds.
 
 And it has teeth — deliberately corrupted copies are all caught: bad megapack magic, out-of-range
 entry, truncated archive (`megapack.entry-out-of-range`), a flipped mesh blob byte

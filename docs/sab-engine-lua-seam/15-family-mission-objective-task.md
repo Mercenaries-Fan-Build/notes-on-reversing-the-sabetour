@@ -183,7 +183,7 @@ Objectives are keyed by an **integer objective ID**, not a handle (see
 | SaveLoadLoadCheckpoint | `SaveLoad.LoadCheckpoint` | `0x00741e90` | **`Script\Interface\SaveLoad.cpp:142`** (`0x8e`) | `()` — **no-op stub** | **confirmed** | assertion string; 51-byte body = logger + `return 1`; Act_1_Race.lua:549 |
 | SaveLoadClearcheckpoint | `SaveLoad.ClearCheckpoint` | `0x00741ed0` | — | `()` | inferred | no body (gap); SabTaskMission.lua:279 |
 
-(`HUD.RemoveCheckpointFromMap` is listed in the [`Checkpoint.*`](#checkpoint---german-road-checkpoints-25) table above.)
+(`HUD.RemoveCheckpointFromMap` is listed in the [`Checkpoint.*`](#checkpoint--german-road-checkpoints-24--one-hud-row) table above.)
 
 ## How the subsystem actually works
 
@@ -218,8 +218,10 @@ Handles do appear in the family, but only as arg 2 and only for world objects:
 
 ### The checkpoint struct, mapped by its setters
 
-Because each `Set*Conv`-style binding is a one-line store, the 25 bindings collectively map a chunk of the
-checkpoint object. Every string here is **hashed by `FUN_00db7e10` and stored as a 4-byte ID** — the raw
+Because each `Set*Conv`-style binding is a one-line store, the **22 setters** collectively map a chunk of
+the checkpoint object. ⚠️ *(corrected 2026-07-24: this said "the 25 bindings", which contradicts the 24-row
+`Checkpoint.*` count above; the 25th row is `HUD.RemoveCheckpointFromMap`, which takes `(x, y, z)` and never
+touches the checkpoint struct.)* Every string here is **hashed by `FUN_00db7e10` and stored as a 4-byte ID** — the raw
 characters are not retained:
 
 | Offset | Set by | Holds |

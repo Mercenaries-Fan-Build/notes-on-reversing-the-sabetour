@@ -13,20 +13,25 @@
 //     u32 total_string_code_units          -- Σ str_len over the base records
 //   record_count × Record                  -- contiguous, no padding
 //     char magic[4] = "TXTD"
-//     u32  asset_id                         -- UI: pandemic_hash(dottedID); VO: audio event id
-//     u16  key_len                          -- bytes incl trailing NUL; 0 for UI text
-//     char key[key_len]                     -- ASCII vo_ name + NUL, or absent
-//     u16  str_len                          -- UTF-16 code units
-//     u16  str[str_len]                     -- UTF-16LE, not NUL-terminated
+//     u32  asset_id                         -- pandemic_hash(dottedID) for UI; opaque id for VO.
+//                                              EITHER WAY it is the store's lookup key.
+//     u16  key_len                          -- bytes incl trailing NUL; 1 for UI text (a lone NUL)
+//     char key[key_len]                     -- ASCII vo_ name + NUL, or a single NUL (never absent)
+//     u16  str_len                          -- UTF-16 code units, INCLUDING the NUL terminator
+//     u16  str[str_len]                     -- UTF-16LE, NUL-terminated
 //   "DNEC" section                          -- per-cinematic-scene VO overlays
 //     u32 group_count
 //     group_count × { u32 scene_hash; u32 file_offset }   -- file_offset is ABSOLUTE
 //     ... sub-blobs to EOF                  -- preserved verbatim; offsets rebased on write
 //
-// Lookup key: key_len>0 ? pandemic_hash(key) : asset_id.  For UI records the ascii key is empty and
-// asset_id IS pandemic_hash("<File>_Text.<Key>"), so adding a UI string = append a keyless record
-// whose asset_id is that hash (no Lua LoadGameTextFile registration needed — base records are
-// always loaded).
+// Lookup key: ALWAYS asset_id, for UI and VO records alike. The engine's tree insert
+// (0x0095f5b9, key = &entry+0x18 = asset_id) runs unconditionally, before key_len is examined.
+// For VO records the ascii key is separately hashed into entry+0x1c, which is the WWISE EVENT ID
+// that Sound.PlayTextID fires -- NOT a lookup key.
+//
+// So adding a UI string = append a record whose asset_id is pandemic_hash("<File>_Text.<Key>") and
+// whose key is a single NUL (key_len==1). No Lua LoadGameTextFile registration needed -- base
+// records are always loaded (inferred from the load path, not confirmed in-game).
 
 use std::env;
 use std::fs;

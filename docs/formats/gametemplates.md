@@ -10,7 +10,7 @@ Two files were used as ground truth:
 | file | size | entries | note |
 |------|------|---------|------|
 | `DLC/01/GameTemplates.wsd` (loose) | 3969 B | 5 templates, 0 markers | small, no markers |
-| main game, embedded in `France/loosefiles_BinPC.pack` @ **0x2732C50** (dec 41107152) | 8 204 431 B | 11072 entries = 10761 templates + 311 markers | full object DB |
+| main game, embedded in `France/loosefiles_BinPC.pack` @ **0x2733ED0** (dec 41107152) *(hex corrected 2026-07-24 — the old `0x2732C50` disagreed with the decimal; `AULB` occurs exactly once in the pack, at `0x2733ED0`)* | 8 204 431 B | 11072 entries = 10761 templates + 311 markers | full object DB |
 
 Both parse with **exact byte consumption** and re-emit **byte-identical** (SHA-256 match).
 
@@ -190,7 +190,7 @@ known texture as a texture reference.
 |-------|--------|
 | magic `AULB`, `u32 entry_count`, LE throughout | **CONFIRMED** (bytes + `FUN_00463b00`) |
 | record = total_size, unk1, unk2, len-prefixed+NUL name & type, pair_count, pairs | **CONFIRMED** (exact-consume both files; `FUN_0045f440` string reader) |
-| `total_size` excludes its own 4 bytes | **CONFIRMED** (measured == stored, all 10766 records) |
+| `total_size` excludes its own 4 bytes | **CONFIRMED** (measured == stored, all 10761 template records) *(corrected 2026-07-24: was "10766")* |
 | pairs = `{u32 hash LE, u32 size, bytes}` | **CONFIRMED** (bytes) |
 | hash is `pandemic_hash(name)`, read **little-endian** | **CONFIRMED** (5 exact name matches, 0 BE matches) |
 | 4-byte data may itself be a `pandemic_hash` ref (`"none"`, sibling templates) | **CONFIRMED** (matches) |

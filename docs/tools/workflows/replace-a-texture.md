@@ -6,6 +6,9 @@ built on — a reskin, a custom icon, a retextured vehicle all follow it.
 **Tools:** `sab_pack` → `sab_dtex` → (`sab_sbla`) → `sab_pack` → `sab_validator`
 **Time:** minutes. **Reversible:** delete one file.
 
+> **Status:** both paths verified end-to-end against retail, each ending in `sab_validator` with
+> 0 fatal. §4a is the single-texture case, §4b the multi-texture one.
+
 ---
 
 ## 0. Back nothing up, overwrite nothing
@@ -33,6 +36,30 @@ sab_dtex list icons.sub
 
 Note the entry number (`#57`) — step 4 needs it.
 
+**First, find out which kind of sub-pack you have** — the two cases take different paths in step 4:
+
+```sh
+sab_sbla list icons.sub
+```
+
+* `empty directory` (exit 1) → **single-texture** sub-pack. `#57` is one of these: it is a 32-byte
+  `ALBS` header followed by one DTEX and nothing else. Use §4a.
+* a directory listing → **multi-texture**. Use §4b.
+
+> ⚠️ **`sab_dtex list` and `sab_sbla list` do not share an index space.** On a multi-texture pack the
+> counts differ by one: the **lead texture is stored in the MIDDLE region and has no directory
+> record**. On entry `#100`, `sab_dtex list` shows 8 textures but `sab_sbla list` shows 7 records, and
+> directory record `#0` is the *second* texture. Never pass a `sab_dtex` position to `sab_sbla`.
+>
+> Map by hash instead — a record's `hash` field is `pandemic_hash(textureName)`:
+>
+> ```sh
+> sab_gametemplates hash DET_Medium256_NM     # -> 0xA6DCD477  == record #0's hash
+> ```
+>
+> The lead texture's hash equals the sub-pack's own `name_crc` (shown in the `sab_sbla list` header),
+> which is how you identify it.
+
 ## 2. Get the texture out, edit it
 
 ```sh
@@ -59,15 +86,14 @@ inherits. That's what keeps the result engine-loadable without you having to kno
 > not byte-identical to retail unless you pass `--preserve`. A recompressed pack is still valid and
 > loads fine — the engine consumes the *decompressed* content.
 
-## 4. Splice it back and build the override
+## 4a. Splice it back — single-texture sub-pack
 
-If the sub-pack holds **one** texture, you can pack the DTEX straight back. If it holds several — the
-usual case — the directory offsets are a running chain and must be rebuilt, which is
-[`sab_sbla`](../../../tools/sab_sbla/README.md)'s job:
+The sub-pack is just the 32-byte `ALBS` header plus the DTEX, so keep the header and append the new
+DTEX. No directory exists, so nothing needs rebasing.
 
 ```sh
-sab_sbla list icons.sub                                    # find the record index
-sab_sbla replace icons.sub 4 my_icon_new.dtex - out.sub    # fixes every downstream offset
+head -c 32 icons.sub > out.sub          # keep the ALBS header
+cat my_icon_new.dtex >> out.sub         # append the new DTEX
 
 # build a single-entry override keyed by the base entry's crc
 sab_pack patch "$GAME/Global/Palettes0.megapack" #57 patchpalettes0.megapack out.sub
@@ -76,6 +102,32 @@ sab_pack patch "$GAME/Global/Palettes0.megapack" #57 patchpalettes0.megapack out
 `patch` copies the base entry's `crc` automatically. That hash is what the engine looks assets up
 by, so your pack answers the same request the base pack would have.
 
+Verified end-to-end on entry `#57` (`TP_BD_Grid01`): repacked DTEX 1489 → 1586 B, resulting override
+passes `sab_validator` with **0 fatal**.
+
+## 4b. Splice it back — multi-texture sub-pack
+
+The directory offsets are a running chain — change one blob's size and every record after it moves —
+so use [`sab_sbla`](../../../tools/sab_sbla/README.md), which recomputes the whole chain:
+
+```sh
+sab_sbla list e100.sub                                     # pick the record (map by hash, see §1)
+sab_sbla replace e100.sub 0 my_tex_new.dtex - out.sub      # fixes every downstream offset
+
+sab_pack patch "$GAME/Global/Palettes0.megapack" #100 patchpalettes0.megapack out.sub
+```
+
+Pass `-` for `uncompSz` to keep the existing value; it only changes if the image's dimensions,
+format or mip count changed.
+
+Verified on entry `#100` replacing `DET_Medium256_NM` (46 562 → 47 114 B, delta +552): passes
+`sab_validator` with **0 fatal**.
+
+> **If you used `sab_sbla replace` before 2026-07-24, re-make your mod.** It placed every blob
+> `dir_end` bytes too early, clipping the preceding asset — the give-away being a validator FATAL
+> naming a texture you never touched. Fixed; see the tool README for the evidence. Streamblock
+> (`flags=0x3C`) sub-packs are still unverified for splicing and now warn.
+
 ## 5. Validate, then install
 
 ```sh
@@ -83,8 +135,10 @@ sab_validator patchpalettes0.megapack
 ```
 
 Exit code 0 and no FATAL findings means the mount path will accept it. **Do this before every
-launch** — the validator is calibrated to 0 false positives on retail, so a FATAL is a real defect,
-not noise.
+launch** — the validator is calibrated to 0 false positives on the `Global/` packs, so for a texture
+mod a FATAL is a real defect, not noise. (That calibration does *not* extend to every retail archive:
+`France/BelleStart0.kiloPack` yields 96 known false positives. See the
+[validator README](../../../tools/sab_validator/README.md).)
 
 Then copy it into `<game>/Global/`:
 
@@ -119,4 +173,5 @@ value as a texture reference.
 | Game loads, texture unchanged | `crc` mismatch — the override isn't answering the same lookup. Re-run `sab_pack patch` against the *correct* base entry rather than hand-picking keys. |
 | Crash at load | Run `sab_validator`. A truncated archive or an overrun blob range is the usual cause. |
 | Texture is garbage/noise | Sub-pack directory chain is wrong — you spliced without `sab_sbla replace`. |
+| Validator FATAL names a texture you didn't touch | You built the mod with a pre-2026-07-24 `sab_sbla`, which placed blobs `dir_end` bytes early and clipped the previous asset. Rebuild with a current binary (§4b). |
 | Texture is black or wrong size | The DDS's format or mip count doesn't match the template DTEX. |

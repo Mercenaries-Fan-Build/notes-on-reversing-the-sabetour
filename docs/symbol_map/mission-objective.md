@@ -13,7 +13,7 @@ The `WSTriggerManager` cluster occupies `0x00a0e130`–`0x00a12xxx`.
 
 - **`FUN_00a10ef0` — `WSTriggerManager::ctor`.** Copies the type tag with `_strncpy(&DAT_01212004,"WSTriggerRegion",0x1f)` and builds **three** 2048-bucket spatial grids (circular-list heads at `+0xc8c`, `+0x2c8c`, `+0x4c8c`), plus a critical section at `DAT_01212044`. Allocated by singleton helper `FUN_006ce470`.
 - **`FUN_00a10ba0` — `WSTriggerManager::Update`.** The per-frame tick; called only from the two game-loop drivers `FUN_0043cc20` and `FUN_009906c0`, and calls `FUN_00a0f690`.
-- **`FUN_00a0f690` — per-region overlap resolve & enter/exit dispatch.** 1958 bytes, sole caller is the tick; walks grid buckets and issues a virtual call `(**(code**)(*param_1+0x14))()` per region — the path that reaches Lua `Trigger.OnTriggerEnter`/`OnTriggerExit`.
+- ⚠️ **REFUTED 2026-07-24.** ~~**`FUN_00a0f690` — per-region overlap resolve & enter/exit dispatch.** … walks grid buckets … the path that reaches Lua `Trigger.OnTriggerEnter`/`OnTriggerExit`.~~ The body shows an **endian-swap serializer** pattern and touches **no grid heads**; the virtual call `(**(code**)(*param_1+0x14))()` is real but this is not the trigger enter/exit dispatch path. The Lua `OnTriggerEnter`/`OnTriggerExit` route is **not currently pinned** — treat it as an open gap rather than as this VA.
 - **`FUN_00a0e960` — `WSTriggerManager::InsertRegionIntoGrid`.** Carries the assert string `WSTriggerManager.cpp:0x17e`; allocates a 0x20-byte node and links it into the region's intrusive lists at `+0x104/+0x108/+0x110`, indexing buckets from the region AABB (`region+0x40..0x4c`).
 - **`FUN_00a0f600` — `WSTriggerManager::AddRegion`.** Thin selector that forwards to the grid insert; called from the region register path.
 
@@ -30,7 +30,7 @@ On the region side (object-file band `0x004c5*`–`0x004ca*`):
 
 ### Objective HUD (display half; medium confidence)
 
-- **`FUN_0079f030` — `WSHUDObjectiveTray::Update`.** Writes `_root.ObjectiveTray._alpha`, toggles visibility via `FUN_0079edc0` (`_root.ObjectiveTray._visible`), and calls the Fightback builder. This is the render side of `HUD.AddObjective`/`HUD.SetObjectiveText`.
+- **`FUN_0079f030` — `WSHUDObjectiveTray::Update`.** Writes `_root.ObjectiveTray._alpha` and calls the Fightback builder. This is the render side of `HUD.AddObjective`/`HUD.SetObjectiveText`. ⚠️ **REFUTED 2026-07-24:** ~~toggles visibility via `FUN_0079edc0` (`_root.ObjectiveTray._visible`)~~ — `FUN_0079edc0` (39 bytes) has `callers=[]` and is **not referenced anywhere in `FUN_0079f030`'s body**. It is dead code; whatever writes `_visible` at runtime is not this call.
 - **`FUN_0079edc0 — WSHUDObjectiveTray::SetVisible`**, **`FUN_00897f60 — HUD::BuildFightbackObjective`** (`GenericObjective_Text.Fightback_Task`/`_Meter`, the escalation objective the Lua corpus references).
 
 ### Engine → Lua mission state
@@ -43,7 +43,7 @@ On the region side (object-file band `0x004c5*`–`0x004ca*`):
 
 ### Gaps
 
-- **`WSObjectiveManager`, `WSObjective`, `WSObjectiveMarker` have no string/path anchors in the decomp** — their VAs/vtables need the pending RTTI vtable→VA map. Only the display (ObjectiveTray) and Lua (`SabTaskObjective`) halves are pinned.
+- **`WSObjectiveManager`, `WSObjective`, `WSObjectiveMarker` have no string/path anchors in the decomp** — their VAs/vtables must come from the RTTI vtable→VA map, which ✅ now exists ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)); this doc predates it and pins only the display (ObjectiveTray) and Lua (`SabTaskObjective`) halves.
 - The **binding thunks** (`HUDAddObjective`, `SetObjective`, `MissionComplete`, `NewMission`, `TriggerWaitFor`, `TriggerGetAllWithin`) live in the mangled `LuaGlueFunctor` band `~0x0161xxxx` and are not individually greppable by name.
 - **`Trigger.WaitFor`'s** exact per-callback registration entry point was not isolated (the region register/insert/teardown path was).
 - The per-region enter/exit **Lua callback marshaller** (reached via the `*+0x14` virtual call in `FUN_00a0f690`) was not traced end-to-end.

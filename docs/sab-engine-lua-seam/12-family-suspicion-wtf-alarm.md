@@ -293,7 +293,7 @@ of its own bit.
 
 ### The radius handshake is the family's only real resource
 
-`SetupSuspicionRadius` is one of just seven `LuaGlueFunctor0R` bindings here and the only one that
+`SetupSuspicionRadius` is one of just nine `LuaGlueFunctor0R` bindings here and the only one that
 *allocates*. It returns an **integer ID** (not a handle — `FUN_006f7040` pushes a number), and
 `KillSuspicionRadius` takes that integer back via `FUN_006f7990`. The corpus treats it as an owned
 resource with nil-guarded cleanup:

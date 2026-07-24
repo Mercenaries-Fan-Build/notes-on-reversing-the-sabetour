@@ -1,5 +1,25 @@
 # The Lua-side wrapper layer
 
+> ## ⚠️ Read this first — parts of this document are superseded
+>
+> This doc predates **`data/lua_registration_map.tsv`**, which carries the Lua table, Lua name, C++
+> symbol and VAs for all 898 bindings. It recovered the Lua↔C++ mapping heuristically, by
+> *correspondence with the Lua corpus*, and that heuristic has a measurable error rate. Three of its
+> named conclusions are retracted inline below (§"What this establishes" item 4, the `Squad` API
+> paragraph, and the `Util.EnableTrigger` row).
+>
+> **Its central caveat — "the Lua-visible spelling is not in the decompiled function set, so every
+> mapping here is recovered by correspondence" — no longer holds.** The Lua name is a plain `.rdata`
+> C string in each registration stanza, present *twice*: for `Actor.Ragdoll` at `0x0070d6eb`,
+> `c7 47 04 d0 dc fd 00` → `0x00fddcd0` = `"Ragdoll"`, and `c7 05 1c d8 42 01 d8 dc fd 00` →
+> `0x00fddcd8` = a second copy. All 898 are readable this way.
+>
+> **The statistical claims in §3 and §4** (448 identity / 131 prefixed / 25 permuted / 122 near /
+> 7 bare / 165 unreferenced, and the 165–294 dead-surface spread) are products of that same matcher.
+> They should be **recomputed as a mechanical join** against the registration map, not merely
+> re-tiered. Everything about the *structure* of the wrapper layer — namespace tables injected into
+> `_G`, the `WRAPPER_*` modules, the require hook — is unaffected and still good.
+
 ## What this establishes
 
 The 898 names in [`data/lua_bindings.txt`](../../data/lua_bindings.txt) are **C++ function names**, not
@@ -18,8 +38,23 @@ Concretely, four things are established here:
    `DespawnObject`; `Util.CreateEvent` is C++ `CreateEventA`.
 3. **At least 165 of the 898 bindings are unreachable from the entire 321-file corpus** — a real dead/
    debug/cut surface, listed below.
-4. **46 namespaced calls hit engine tables but have no binding in the 898 under any mapping rule**, and
-   none of them are defined in Lua. The 898 list is therefore **incomplete**, not merely mismatched.
+4. ⚠️ **RETRACTED 2026-07-24.** ~~**46 namespaced calls hit engine tables but have no binding in the
+   898 under any mapping rule** … The 898 list is therefore **incomplete**, not merely mismatched.~~
+   **The 898 list is complete; the matcher was wrong.** Of the 28 orphans this doc actually names, at
+   least 5 are in `data/lua_registration_map.tsv` — **including the load-bearing example** this
+   section rests on:
+
+   | claimed orphan | actually registered as |
+   |---|---|
+   | `Util.SetDisableControls` | C++ `SetDisableControlsTable`, impl `0x00750110` |
+   | `Actor.ExitSpecialKillMode` | C++ `PlayerKillModeCancel`, impl `0x007163c0` |
+   | `Vehicle.SetupRace` | C++ `SetPlayerRoad`, impl `0x0075ffb0` |
+   | `SaveLoad.ClearCheckpoint` | C++ `SaveLoadClearcheckpoint`, impl `0x00741ed0` |
+   | `AttractionPt.EnableBroadcast` | C++ `AttractionPtEnable`, impl `0x00717790` |
+
+   Root cause: this document predates `lua_registration_map.tsv` and recovered the Lua↔C++ mapping by
+   *corpus correspondence*. See [`00-seam-overview.md`](00-seam-overview.md) §8.2, which reaches the
+   same conclusion independently. **≈24 genuine orphans remain**, not 46.
 
 The `.luap` container itself is solved elsewhere — see [`docs/formats/lua_scripts.md`](../formats/lua_scripts.md).
 Engine-side subsystem VAs live in [`docs/symbol_map/`](../symbol_map/). This doc is the caller side only.
@@ -185,7 +220,7 @@ These are not mechanical transforms; someone chose a different Lua name than the
 | `Suspicion.EnableGlobal` | `EnableSuspicionGlobal` | noun infix |
 | `Suspicion.ResetMeter` | `ResetSuspicionMeter` | noun infix |
 | `Combat.Exit` | `ExitCombat` | verb/noun reorder |
-| `Util.EnableTrigger` | `TriggerEnable` | reorder |
+| ~~`Util.EnableTrigger`~~ ⚠️ | `TriggerEnable` | **CORRECTED 2026-07-24:** `TriggerEnable` registers as **`Trigger.Enable`** (38 corpus call sites), not under `Util`. `Util.EnableTrigger` has 2 corpus sites and resolves to nothing — it is a genuine orphan, wrongly used here to "explain" a binding that belongs to another table. |
 | `Vehicle.EnableTraffic` | `TrafficEnable` | reorder |
 | `Object.PlayerTeleportToLocator` | `MissionTeleportPlayerToLocator` | interface renamed `Mission`→`Object` |
 | `Render.HeatShimmerFilter` | `HeatShimmerFilterCallback` | suffix dropped |
@@ -230,12 +265,26 @@ The character of the dead list is legible and falls into four groups:
 `DEBUGTeleportToLocator`, `DEBUGClearStreamblockChangeListTree`, `DEBUG_DumpEvents`, `BreakpointIndex`,
 `GetScriptArgNum`, `LuaHook_Require`.
 
-**The Squad API — an entire cut subsystem.** `CreateSquad`, `DeleteSquad`, `AddToSquad`,
-`AddSquadObjective`, `ClearSquadObjectives`, `DefendSquadObjectives`, `FollowSquadLeader`,
-`ClearSquadLeader`, `ClearSquadBehavior` are all present in the binary and all unreferenced. Note the
-corpus *does* call `Squad.*` 189 times across 13 methods — but **none of those 13 resolve to any of these
-bindings**, which is a strong hint that shipped `Squad` is a *different, Lua-side* table that reuses the
-name. Worth a dedicated look.
+⚠️ **RETRACTED 2026-07-24 — the Squad API is live, not cut.** ~~**The Squad API — an entire cut
+subsystem.** … **none of those 13 resolve to any of these bindings**, which is a strong hint that
+shipped `Squad` is a *different, Lua-side* table that reuses the name.~~
+
+**All 13 called methods resolve — to exactly the bindings called dead here.** `Squad` is one of the
+26 registered tables (18 bindings). The corpus's 189 call sites map cleanly:
+
+```
+Squad.AddMember    66 -> AddToSquad          Squad.Create      38 -> CreateSquad
+Squad.Delete       10 -> DeleteSquad         Squad.SetEnemy    22 -> SetSquadEnemy
+Squad.FollowLeader  7 -> FollowSquadLeader   Squad.ClearLeader  1 -> ClearSquadLeader
+Squad.ClearBehavior 4 -> ClearSquadBehavior  Squad.SetLeader   12 -> SetSquadLeader
+...  13/13 resolve, 0 orphans
+```
+
+The failure is the same one behind item 4 above: this doc matched Lua names against **C++ symbols**,
+and every `Squad.*` binding is renamed at registration (`Squad.AddMember` ← `AddToSquad`, etc.).
+**This also inflates the §4 "165 unreferenced" figure**, which should be recomputed as a mechanical
+join against `data/lua_registration_map.tsv` rather than re-tiered. Open Q3 ("what is the shipped
+`Squad` table?") is answered and withdrawn.
 
 **A needs/wander AI layer** — `BroadcastNeed`, `EnableNeed`, `AreNeedsEnabled`, `ChooseWanderPoint`,
 `AttrPtGetAllByNeed`, `FindUnseenPtFromList`, `GetSuperAttrPt`, `BroadcastScaryEvent`. `__MagicNumbers.lua:15-21`

@@ -1,6 +1,6 @@
 # Render, Particle, Light & Fx
 
-The WildStar/Odin visual-effects layer of *The Saboteur*. This document pins the **object-management** half of the subsystem — how explosions, decals, particles and lights are pooled, spawned and torn down — because that half leaves string and structural anchors in the decomp. The **draw/submit** half (Odin shaders, materials, DTEX textures, the render-task job graph) is Odin-layer code with no assert strings and is not yet pinnable without the RTTI vtable→VA map (see Gaps).
+The WildStar/Odin visual-effects layer of *The Saboteur*. This document pins the **object-management** half of the subsystem — how explosions, decals, particles and lights are pooled, spawned and torn down — because that half leaves string and structural anchors in the decomp. The **draw/submit** half (Odin shaders, materials, DTEX textures, the render-task job graph) is Odin-layer code with no assert strings, so it needs the RTTI vtable→VA map — which ✅ now exists ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)) but has not yet been applied here (see Gaps).
 
 ## RTTI classes owned
 
@@ -47,7 +47,7 @@ These object sizes/counts are directly usable symbol-map facts (e.g. a `WSLight`
 
 ## Gaps / not yet pinned
 
-- **Render/draw path**: `WSParticleRender` (PblSingleton) draw+update, `WSGfxSubsystem`/`WSGfxSubsystemJob`, and the `WSRenderingTask`/`WSShellRenderTask` job graph — need the vtable→VA map.
+- **Render/draw path**: `WSParticleRender` (PblSingleton) draw+update, `WSGfxSubsystem`/`WSGfxSubsystemJob`, and the `WSRenderingTask`/`WSShellRenderTask` job graph — resolvable from the vtable→VA map ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)), which now exists; not yet applied here.
 - **Shaders/materials**: `OdinShader`, `OdinExMaterialShader`, `Win32VertexShader`/`Win32PixelShader`, `Win32ExShaderBinding` — Odin-layer, no assert strings in this dump.
 - **WSAO materials & DTEX textures**: no string/class anchor found in the provided files; likely in an Odin resource module outside this decomp.
 - **Lights beyond pool sizes**: `WSLight::Update`, `WSLightVolumeManager`, halo rendering unlocated.

@@ -1,7 +1,11 @@
 # Ghidra: full-binary decompile export
 
 `DecompileSaboteur.java` decompiles every non-thunk function in `Saboteur.exe` to one text file
-(`output/_ghidra_saboteur/saboteur_all_functions_decomp.txt`, ~54 MB, gitignored). Because the retail
+(`output/_ghidra_saboteur/saboteur_all_functions_decomp.txt`, ~54 MB, gitignored). ⚠️ **The existing
+export is not under this repo** — the copy everything cites lives in the sibling repo at
+`C:/Users/Shadow/Desktop/notes-on-the-released-game/output/_ghidra_saboteur/`. Re-running the script
+here would write a fresh one to this repo's `output/`; point your greps at the sibling path unless you
+have actually regenerated it. Because the retail
 exe is unpacked and RTTI-rich, Ghidra's auto-analysis recovers thousands of class/function names, so the
 export comes out substantially pre-named.
 

@@ -208,7 +208,7 @@ not a different contract.
 | GetLocalizedText | `Cin.GetLocalizedText` | `0x0071c910` | — | `(sTextID) -> sText \| nil` | eax | confirmed | exe; hash → `FUN_0095e4e0` on `DAT_0147db78` → `FUN_006f7080` (push string); miss → `pushnil`; GameTips.lua:54 |
 | LoadGameTextFile | `Cin.LoadGameTextFile` | `0x0071c810` | — | `(sFileName)` | 1* | confirmed | exe; hash → `FUN_0095f7f0`; **zero corpus call sites** |
 | ReleaseGameTextFile | `Cin.ReleaseGameTextFile` | `0x0071c890` | — | `(sFileName)` | 1* | confirmed | exe; hash → `FUN_0095fbe0`; **zero corpus call sites** |
-| SubtitlesOn | `Cin.SubtitlesOn` | `0x0071e950` | — | `(b)` — **SHIPPED STUB, body is `mov eax,1; ret`** | 1* | confirmed | exe; the entire function is 6 bytes @`0x71e950`; **called 3× in P1FP_Traitor.lua** and does nothing |
+| SubtitlesOn | `Cin.SubtitlesOn` | `0x0071e950` | — | `(b)` — **SHIPPED STUB, body is `mov eax,1; ret`** | 1* | confirmed | exe; the entire function is 6 bytes @`0x71e950`; **called 4× in P1FP_Traitor.lua** (`:909`, `:1105`, `:1132`, `:1140` — *corrected 2026-07-24, was 3×*) and does nothing |
 
 ### `Util.*` — tutorial system (5)
 
@@ -232,7 +232,7 @@ not a different contract.
 | HQSetOnMiniMap | `Util.HQSetOnMiniMap` | `0x0074e950` | — | `(sHQName, bOn)` | 1* | confirmed | exe; hash → `FUN_009ba700`; RewardsManager.lua:4681 |
 | PlayTextID | `Sound.PlayTextID` | `0x00743eb0` | — | `(hSpeaker, sTextID)` \| `(sTextID, sX)` | 1* | confirmed | exe; hashes text id, looks it up in the game-text table, gated on `[entry+0x1c] != 0` → `FUN_0095df40`; **zero corpus call sites** |
 | PrintMissionText | `Render.PrintMissionText` | `0x0073def0` | — | `(s)` — **SHIPPED STUB: validates and discards its argument** | 1* | confirmed | exe; `6f7160(1)` then `6f7a80(1)` @`0x73df3d`, result never used, `ret` @`0x73df43`; **zero corpus call sites** |
-| PrintMessage | `Render.PrintMessage` | `0x0073fcb0` | — | `(s)` — **SHIPPED STUB, body is `mov eax,1; ret`** | 1* | confirmed | exe; 6 bytes @`0x73fcb0`; **called 3× in Experimental/Checkpoint_v2.lua** and does nothing |
+| PrintMessage | `Render.PrintMessage` | `0x0073fcb0` | — | `(s)` — **SHIPPED STUB, body is `mov eax,1; ret`** | 1* | confirmed | exe; 6 bytes @`0x73fcb0`; **called 6× in Experimental/Checkpoint_v2.lua** (`:30`, `:42`, `:59`, `:73`, `:83`, `:94` — *corrected 2026-07-24, was 3×*) and does nothing |
 
 ---
 
@@ -502,8 +502,8 @@ side table, not a salted object handle, so **none of the handle machinery in
 
 | binding | body | called from |
 |---|---|---|
-| `Render.PrintMessage` `0x0073fcb0` | `mov eax,1; ret` (6 bytes) | Experimental/Checkpoint_v2.lua:30, 42, 59 |
-| `Cin.SubtitlesOn` `0x0071e950` | `mov eax,1; ret` (6 bytes) | Missions/P1FP_Traitor.lua:909, 1105, 1132 |
+| `Render.PrintMessage` `0x0073fcb0` | `mov eax,1; ret` (6 bytes) | Experimental/Checkpoint_v2.lua:30, 42, 59, 73, 83, 94 (6 sites) |
+| `Cin.SubtitlesOn` `0x0071e950` | `mov eax,1; ret` (6 bytes) | Missions/P1FP_Traitor.lua:909, 1105, 1132, 1140 (4 sites) |
 | `Render.PrintMissionText` `0x0073def0` | type-checks arg 1, fetches it, **discards it**, returns | — |
 
 `Render.PrintMessage` was the debug-print binding; it survives in the registration table (so

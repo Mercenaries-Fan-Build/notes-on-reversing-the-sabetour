@@ -65,7 +65,10 @@ sectors). Padding bytes are never read; real packs use filler `0xCB`, writer use
   (`crc 0xD3EF69E0/index 0xB333DA43` vs `0x708B49A0/0x5E3513B5`). The same physical asset is
   mounted under two logical paths. Therefore neither field is a content checksum
   (`crc32(data)=0x6BB5A08D ≠ 0xD3EF69E0`) nor a function of the asset name
-  (`crc ≠ pandemic(name)` on all 578 named samples).
+  (`crc ≠ pandemic(leafName)` on all 578 named samples). ✅ **Resolved 2026-07-24:** it *is* a
+  pandemic hash — of the **decorated** string, not the bare name:
+  `crc = pandemic_hash("global\<resourceName>.dynpack")` and `index = pandemic_hash(resourceName)`.
+  See the confidence table below and [`megapack_key_derivation.md`](megapack_key_derivation.md).
 - **The container's own hash is separate:** the ALBS sub-pack stores `pandemic_hash(assetName)`
   at ALBS+0x08 (and +0x24). Verified `pandemic_hash("P_Keys_KeyRing_A")==0xF4B78198` and on all
   578 named sub-packs. This is *not* the megapack key.
@@ -76,13 +79,19 @@ sectors). Padding bytes are never read; real packs use filler `0xCB`, writer use
 ## Sub-pack (ALBS) — copied verbatim
 The writer copies the `[offset, offset+size)` slice, so the ALBS/MSHA/zlib bytes are preserved
 exactly; no (de)compression is needed. Sub-pack anatomy (for reference; see
-[`mesh_geometry.md`](mesh_geometry.md)): `"ALBS"`(0x414C4253) header, then `"MSHA"`(disk `AHSM`)
+[`mesh_geometry.md`](mesh_geometry.md)): `"ALBS"` header — ⚠️ **as the u32 the engine compares that is
+`0x53424C41`, not `0x414C4253`** (on-disk bytes `41 4C 42 53`, read little-endian; the decomp tests
+`iVar3 == 0x53424c41`). *(Corrected 2026-07-24; `sbla_subpack.md`, `archive_and_models.md` and
+`dtex_texture.md` all state it correctly, and `archive_and_models.md` devotes a "★ read before writing
+anything" section to exactly this trap.)* — then `"MSHA"`(disk `AHSM`)
 wrappers `{u32 magic; u32 unc0; u32 unc1; u32 c0; u32 c1; char name[0x100]}` + two zlib blobs
 (`78 01`).
 
 ## Patch-override packs
 `FUN_00e34f70(name,1,0x600,0x180,priority)` mounts a pack and qsorts the mounted list by
-priority (desc). Observed priorities (call site @ `0x00d81…`, decomp lines 885093–885102):
+priority (desc). Observed priorities (enclosing function **`FUN_009f2df0` @`0x009f2df0`**, decomp lines
+885093–885102 — *VA corrected 2026-07-24; the previous `0x00d81…` was wrong, and
+`archive_and_models.md` already had it right as "caller ~`FUN_009f2xxx`"*):
 `Dynamic0`=100, `palettes0`=0x5A, **`patchdynamic0`=0x18704 (100100)**, `patchpalettes0`=0x186FA.
 `dynpack` lookups (`FUN_009ef620`→`FUN_00e35140`, param_3=500) consult any pack with
 priority>499 first, in descending order. So a `Global/patchdynamic0.megapack` whose single
@@ -108,4 +117,4 @@ entry's `crc` equals a base asset's `crc` overrides it with no base rebuild.
 | ALBS+0x08 = `pandemic_hash(assetName)` | **CONFIRMED** | 578/578 named sub-packs; `pandemic("ANY")==0xED057225` self-check |
 | engine does NOT validate crc/index vs data | **CONFIRMED** | `FUN_00e428c0` stores fields verbatim, no re-hash/compare |
 | patch priority 0x18704 ≫ base 100; by-hash override | **CONFIRMED** | decomp mount call sites 885093/885098; `FUN_00e350d0/e35140` priority gate 499/500 |
-| exact string→`crc`/`index` transform (path→hash) | **UNKNOWN** | keys hash resource-DB paths not stored in the megapack; not recoverable from pack alone |
+| exact string→`crc`/`index` transform (path→hash) | ✅ **SOLVED** *(status corrected 2026-07-24 — was "UNKNOWN")* | `index = pandemic_hash(resourceName)` and `crc = pandemic_hash("global\<resourceName>.dynpack")`. Reproduced from the name alone: `Act1_IntKey` → index `0xb333da43` ✓ / crc `0xd3ef69e0` ✓; `AMBCat_CellKey` → `0x5e3513b5` ✓ / `0x708b49a0` ✓; `AI_Alarm` → `0xae540515` ✓ / `0x4ce0d45c` ✓. Corroborated in the decomp: `FUN_009f2530` does `_sprintf(buf,"%s%s", <registeredName>, ".dynpack")` then `FUN_009ef620(buf, …)` — the resolver takes a **string**. Full derivation: [`megapack_key_derivation.md`](megapack_key_derivation.md). |

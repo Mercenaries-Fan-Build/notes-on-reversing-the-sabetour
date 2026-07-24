@@ -187,7 +187,7 @@ namespace prefix the C++ side carries and the Lua side does not:
 | `ActorIsAlive` | `Actor.IsAlive` |
 | `ActorGetPosition` | `Actor.GetPosition` |
 | `PlayerKillModeCancel` | `Actor.ExitSpecialKillMode` |
-| `TrainRegisterTrainDecoupledCallback` | `Train.RegisterDecoupledCallback` |
+| `TrainRegisterTrainDecoupledCallback` | `Train.TrainRegisterDecoupledCallback` ⚠️ *(corrected 2026-07-24 — was wrongly given as `Train.RegisterDecoupledCallback`. The registration stanza's name pointers both target the string `TrainRegisterDecoupledCallback`; only the infix `Train` is dropped, not the prefix. Neither spelling appears in the Lua corpus, so the binary is the only arbiter. This is exactly the trap the table exists to illustrate — see [`05`](05-engine-to-lua-callbacks.md) §"infix removal".)* |
 | `SetDistantRagdollSound` | `Actor.SetDistantRagdollSound` (unchanged) |
 
 The last row matters: the prefix is *not* mechanically strippable. `SetDistantRagdollSound` and
@@ -232,14 +232,36 @@ c3                 ret
 initializers are queued on a deferred-init object at CRT time and drained later, rather than
 running the registration at static-init time.
 
-I could **not** pin the drain point, and one specific thing blocks it: `FUN_006f6620` — the
-registry constructor that receives the table name — is `jmp 0x01638da0`, and 0x01638da0 lies
-inside the **`.secu` section** (0x015fc000-0x0163ca40). This is a SecuROM-protected binary and
-the registry ctor body has been relocated behind the protection. The build-time side of the
-seam is fully readable; the consumption side (registry list → real Lua table) is not, statically.
+I could **not** pin the drain point. `FUN_006f6620` — the registry constructor that receives the
+table name — is `jmp 0x01638da0`, and `0x01638da0` does lie inside the **`.secu` section**
+(`0x015fc000`-`0x0163ca40`).
+
+> ⚠️ **CORRECTED 2026-07-24 — the inference drawn from that was wrong.** ~~This is a SecuROM-protected
+> binary and the registry ctor body has been relocated behind the protection … the consumption side
+> is not readable, statically.~~ **Nothing is behind protection.** `FUN_01638da0` is **fully
+> decompiled** (`size=56`), and **928 functions in the `.secu` VA range are present in the decomp**.
+> Docs [`04`](04-vm-lifecycle-and-script-objects.md) and [`05`](05-engine-to-lua-callbacks.md)
+> already transcribe several of them (`FUN_01639500`, `FUN_016390b0`) without difficulty. The body is:
+>
+> ```c
+> int __thiscall FUN_01638da0(int this, char *name) {
+>   iVar1 = this + 4;
+>   *(int *)(this + 8) = iVar1;  *(int *)iVar1 = iVar1;   // circular list, self-linked
+>   *(undefined4 *)(this + 0xc) = 0;  *(undefined4 *)(this + 0x10) = 0;
+>   _strncpy((char *)(this + 0x14), name, 0x27);          // char name[0x28] inline
+>   *(undefined1 *)(this + 0x3b) = 0;
+>   return this;
+> }
+> ```
+>
+> `0x14 + 0x28 = 0x3c`, which matches the `operator new(0x3c)` exactly — so **Q3 ("what is the
+> 0x3c-byte registry?") is answered**: a self-linked circular list head plus a 0x28-byte inline name.
+> See [`00-seam-overview.md`](00-seam-overview.md) §7.3, which adjudicated this. Note also that
+> `AGENTS.md` is right that the retail exe is clean — a `.secu` *section* exists, but it is inert and
+> its contents disassemble normally.
 
 **Confidence: confirmed** for the CRT-init stub bytes and the `.secu` jmp target.
-**Open** for the drain order and for what the 0x3c-byte registry actually does with the list.
+**Open** for the drain order only.
 
 ## Relation to `FUN_006f96e0` / `DAT_0142d324`
 

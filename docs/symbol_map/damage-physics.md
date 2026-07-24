@@ -34,9 +34,23 @@ Death / ragdoll:                         ▼
  FUN_006c4030/4140 HavokUtil ragdoll pivots         └─► FUN_00898440 HiveMind gawk event
 ```
 
-## Pinned functions (string-anchored)
+## Pinned functions (string-anchored) — ⚠️ 17 of 22, not all 22
 
-Every VA below carries an inline assert/log string (`file.cpp` + `Class::Method`) that the decompiler preserved, so the class/method names are **ground truth**, not guesses.
+**17** of the 22 VAs below carry an inline assert/log string (`file.cpp` + `Class::Method`) that the
+decompiler preserved; for those the class/method names are **ground truth**, not guesses.
+
+**The other 5 are inferred and are proposals, not ground truth:**
+
+| VA | Claimed name | What the body actually carries |
+|----|--------------|-------------------------------|
+| `FUN_004886b0` | `WSExplosion::Spawn` | no `Class::Method` string, no `.cpp` path. (`"WSExplosion::Spawn"` occurs nowhere in the decomp; only `"WSExplosion::SetupExplosion"` does.) |
+| `FUN_00666b20` | `WSDamageable::ApplyDamage` | no anchor string at all — and this doc already says so at its own line 83 ("its exact method name is inferred"). No `"WSDamageable::…"` string exists anywhere in the decomp. |
+| `FUN_0099bc00` | `WSHumanPhysics::DispatchCollisionDamage` | no anchor string, no `.cpp` path |
+| `FUN_006c4030` | `…GetRagdollConstraintPivotA` | only `WSHavokUtil.cpp` + the message `"Unsupported type of constraint in rag doll"` — the *method* name is invented |
+| `FUN_006c4140` | `…GetRagdollConstraintPivotB` | as above |
+
+Everything else in this section is genuinely string-anchored. (Corrected 2026-07-24: this paragraph
+previously claimed *every* VA was anchored, which contradicted the doc's own line 83.)
 
 | VA | Name | Evidence |
 |----|------|----------|
@@ -77,7 +91,7 @@ Every VA below carries an inline assert/log string (`file.cpp` + `Class::Method`
 
 ## Gaps / caveats
 
-- No RTTI **vtable→VA map** yet, so Lua binding C-thunks (`CreateExplosion`, `GetHealth`/`SetHealth`, `GetDamageState`, `ActorRagdoll`, fall-damage setters) can't be pinned exactly. Only the CreateExplosion path is pinned, via the `FUN_004886b0 → FUN_00487510` chain + Lua-corpus behavior match.
+- ✅ **Resolved 2026-07-24:** the Lua binding C-thunks (`CreateExplosion`, `GetHealth`/`SetHealth`, `GetDamageState`, `ActorRagdoll`, fall-damage setters) **can** now be pinned exactly — [`lua_registration_map.tsv`](../../data/lua_registration_map.tsv) carries `impl_va`/`thunk_va` for all 898. This doc predates it and pins only the CreateExplosion path, via the `FUN_004886b0 → FUN_00487510` chain + Lua-corpus behavior match; the rest are unconverted.
 - `WSExplosionApplyImpulseFunction` (the per-body impulse callback) is **unpinned**; SetupExplosion's world/impulse/FX calls (`FUN_00898970`, `FUN_007f85e0`, `FUN_009db910`, `thunk_FUN_00492f81`) are unlabeled.
 - The **fall-vs-impact dispatcher** at ~`0x0058ace3`/`0x0058acef` lives in an un-emitted region between `FUN_0058a480` and `FUN_0058ad00` — no header was produced, so it could not be named.
 - `WSDamageable` / `WSDamageablePart` / `WSDamageSphere` / `WSDamageRegion` carry no inline strings; their methods aren't individually pinned. `FUN_00666b20` is the best-evidenced shared health-subtraction core but its exact method name is inferred.

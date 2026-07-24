@@ -18,7 +18,7 @@ Scripts drive animation through `Actor.*` bindings (names from `lua_bindings.txt
 - `LoadAnimGroup` / `PreloadAnimGroup` / `UnloadAnimGroup` — e.g. `Util.LoadAnimGroup("belle")` (`InteriorLevels/Belle_Interior.lua`) → `PclAnimationStreamer`/MegaFile.
 - Ragdoll: `ActorRagdoll`, `RegisterRagdollCallback`, `ClearRagdollCallback`, `SetFallDamageRagdoll`, `IsRagdollInWater`, `SetDropWeaponWhenRagdolled` → **`WSHumanStateRagdoll`** + `hkaRagdollInstance`.
 
-> Note: without an RTTI vtable→VA map, these binding names are not greppable as strings; the mapping below is by assert-string and caller chain.
+> Note: binding names are not greppable as strings in the decomp, so the mapping below was built by assert-string and caller chain. ✅ Since 2026-07-24 they can be resolved directly instead — [`lua_registration_map.tsv`](../../data/lua_registration_map.tsv) gives every binding's `impl_va`/`thunk_va`.
 
 ## Havok 6.5 sampler edge (the decode core)
 
@@ -70,7 +70,7 @@ Supporting Havok utilities:
 
 ## Gaps / open items
 
-- **No vtable→VA map**: Lua-glue entry functions for `PlayAnimation`, `ActorRagdoll`, etc. are not individually pinned; mappings here are by assert-string + caller chain.
+- ~~**No vtable→VA map**~~ ✅ **Resolved 2026-07-24:** the Lua-glue entry functions for `PlayAnimation`, `ActorRagdoll`, etc. are individually pinned in [`lua_registration_map.tsv`](../../data/lua_registration_map.tsv) (`impl_va`/`thunk_va`). The mappings below predate it and were made by assert-string + caller chain — worth re-checking against the map.
 - **Wavelet & delta samplers not uniquely pinned**: only SplineCompressed carries a source-path assert. Wavelet/delta decoders are in the same module but need the vtable map; unlabelled large candidates: `FUN_00eb2180`, `FUN_00eb90c0`, `FUN_00eb8590`, `FUN_00ebe0a0`.
 - **PclAnimator method names** (`FUN_00e3c290`/`FUN_00e3c070`) are inferred from caller pairing, not in-body strings; which Havok call they wrap (`sampleAndCombine` vs `sampleTracks`) is unconfirmed.
 - `FUN_00eb7e00` shows `callers=[]` (vtable-dispatched only); its call site is inferred from structure.

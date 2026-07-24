@@ -1,5 +1,20 @@
 # Sound (Wwise)
 
+> ## ⚠️ Every `WSSound*::` method name in this document is INFERRED
+>
+> There is **not a single `WSSound*::Method` assertion string anywhere in the 54 MB decomp** — a
+> `grep -oE '"WSSound[A-Za-z]*::[A-Za-z_~]+"'` over the whole export returns **0 matches** — and none
+> of this doc's 22 VAs appear in `data/symbol_map/pc_symbol_map.tsv`, which carries every
+> assert-derived name in the repo. The **VAs are solid** (39/39 exist, and the `AK::*` calls inside
+> them are real, demangled middleware symbols); the **names are not**. Each
+> `WSSoundManager::X` / `WSSoundEmitter::X` label below is a behavioural proposal derived from the
+> Wwise call the function wraps and its call-site topology.
+>
+> This caveat was missing until 2026-07-24: the doc disclaimed only its binding-thunk and vtable VAs,
+> and its adversarial pass reported "22/22 confirmed" — which meant *the VAs exist and plausibly
+> match*, not that the identities were proven. `WSSoundManager` has only 3 vtable slots, so the RTTI
+> map will not promote these either. **Read the names as hypotheses; cite the VAs, not the labels.**
+
 The audio subsystem is a thin WildStar/Odin ("Odin") glue layer over an **embedded Audiokinetic Wwise 2008.x runtime**. The Ghidra decomp retains demangled Wwise symbols (`AK::SoundEngine::*`, `AK::StreamMgr::*`, `AK::MusicEngine::*`, `CAk*` classes), so the boundary between Pandemic code and the licensed middleware is unusually legible. Game code and Lua never call Wwise directly; everything goes through the `WSSoundManager` / `WSSoundBankManager` / `WSSoundEmitter` wrappers in the `0x00917xxx`–`0x0091bxxx` range, which share a consistent `*(this+0x11dc)` "SoundEngine initialized" gate.
 
 ## RTTI classes owned
@@ -10,7 +25,9 @@ The embedded Wwise runtime contributes a large `CAk*` class set (music: `CAkMusi
 
 ## Lua API surface
 
-The `Sound.*` table is the scripting entry point (see `data/lua_bindings.txt` and usage across `docs/saboteur-luacd/src`):
+The `Sound.*` table is the scripting entry point (see **`data/lua_registration_map.tsv`** — not
+`lua_bindings.txt`, which lists C++ symbols rather than Lua names — and usage across
+`docs/saboteur-luacd/src`):
 
 - **Banks:** `Sound.LoadSoundBank("m_A1M1_inGame.bnk")`, `Sound.ReleaseSoundBank(...)`, `Sound.UnloadSoundBank` (e.g. `Missions/Act_1_Race.lua:31`, `ScriptControllers/BASE_LaVillette.lua:58`).
 - **Events on emitters:** `Sound.AttachSoundEvent(hEmitter, "cue")`, `Sound.PlayOwnerlessSoundEvent("A1M1_Race_Start")`, `Sound.StopSoundEvent`, `Sound.BroadcastSound`, `Sound.ActivateSoundEmitter(Handle(...))` / `Sound.DeactivateSoundEmitter` (e.g. `Act_1_Race.lua:411-412`, `Experimental/Soldier_Internal.lua:33`).
@@ -52,7 +69,7 @@ Stopping is **`FUN_009182a0`** (posts, or `ExecuteActionOnEvent` with the stop a
 
 ## Gaps
 
-- Lua glue thunk VAs (`LoadSoundBank`, `AttachSoundEvent`, `SetMusicLocale`, `PlayMusicStab`, …) require the RTTI vtable→VA map; here they are matched to manager methods by behavior, not by a call edge.
+- ✅ **Resolved 2026-07-24:** the Lua glue thunk VAs (`LoadSoundBank`, `AttachSoundEvent`, `SetMusicLocale`, `PlayMusicStab`, …) are in [`lua_registration_map.tsv`](../../data/lua_registration_map.tsv) with `impl_va`/`thunk_va`. In this doc they are still matched to manager methods by behavior rather than by a call edge — and note the manager method *names* remain inferred regardless (see the banner at the top); `WSSoundManager` has only 3 vtable slots, so the vtable map cannot pin them.
 - Vtable VAs and confirmed field names for the three managers / emitter / trigger classes are inferred.
 - Music-locale name→AK State/Switch table and `WSCinemaMusicState` logic not fully traced.
 - Event-id hashes (e.g. `0xedeb0f33`) are Wwise IDs; human names need a `WWiseIDTable.bin` dump.
@@ -80,6 +97,6 @@ Stopping is **`FUN_009182a0`** (posts, or `ExecuteActionOnEvent` with the stop a
 - Language/region selector FUN_00918650 @0x00918650 (the input that produces the index passed to GetLanguagePckName; called from LoadWwiseData at 0x009187cc, result stored to *(this+0x13b8)) decompiles garbled: Ghidra emits 'return (bool)2;' / 'return (bool)3;' from a switch on DAT_01111430 reading *DAT_0147db78. It is really returning a 0-3 language enum, not a bool - bool-cast corruption. The doc silently treats the language index as originating in GetLanguagePckName but the actual selection logic lives here and is mangled.
 - Three distinct manager flags are easy to conflate and the doc lists them separately without cross-warning: *(this+0x1194) = InitSoundEngine-success flag (set at 748275, also transiently reused/cleared inside SetListenerPosition at 749152/749181 as a 'first-frame' latch); *(this+0x11dc) = engine-ready gate guarding ALL post/set/register wrappers (set to 1 at line 749374, NOT in InitSoundEngine); *(this+0x11dd) = bank-data-loaded flag set by LoadWwiseData (748805). Note 0x1194 is dual-purposed by SetListenerPosition, which is a decomp-reading hazard.
 - Minor attribution error to fold in: FUN_009149e0 (LoadBankSync) is documented as 'Matches Lua Sound.LoadSoundBank', but its ONLY caller is FUN_009153d0 (the SoundBanks.ini parser, via _strtok loop at 746692). It is the synchronous startup bank loader, not a Lua entry point. Sound.LoadSoundBank almost certainly maps to FUN_00914b30 (LoadBankAsync), which has many game-wide callers. The Lua attribution should move off the sync variant.
-- lua_bindings.txt is a flat name list with NO namespace - the 'Sound.' table prefix in the doc is inferred grouping, not attested in the data. All 16 claimed binding names are present, but the 'Sound.' qualification is an assumption.
+- ~~lua_bindings.txt is a flat name list with NO namespace - the 'Sound.' table prefix in the doc is inferred grouping, not attested in the data. All 16 claimed binding names are present, but the 'Sound.' qualification is an assumption.~~ **❌ RETRACTED 2026-07-24.** `lua_bindings.txt` is prefix-less because it lists **C++ symbols, not Lua names** (256 of 898 differ). `Sound` is a genuine registered Lua table in `data/lua_registration_map.tsv`, so the `Sound.` qualification is attested, not assumed. (This is the same mistake retracted in [`ai-behavior.md`](ai-behavior.md); there it would have inverted two live bindings.)
 - AK::SoundEngine::StopPlayingID @0x01374880 and AK::SoundEngine::ClearBanks @0x01375295 exist in the binary but no WSSoundManager wrapper for them is documented; worth a pass to see if StopSoundEvent/bank-reset paths route through them (StopPlayingID would be the natural per-instance stop, vs the documented ExecuteActionOnEvent stop in PostEventOrStop).
 

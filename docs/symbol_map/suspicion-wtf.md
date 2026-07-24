@@ -58,11 +58,27 @@ Usage in the corpus: `SabTaskObjectiveEscalation.lua` waits on `OnEscalation<lev
 `SoldierState_*` (Investigate/Hunt/Combat/PaperCheck) drive `Suspicion.SetState`;
 `SuspicionZone.lua` → `Trigger.CreateSuspicionZone` (binding `TrigCreateSuspicionZone`).
 
-### Pinned functions
+### Pinned functions — ⚠️ 4 string-anchored, 13 inferred
 
 The `0x0089xxxx` cluster is the `WSAICombatHiveMind.cpp` / `WSAISuspicionRadius` core; the
 `0x008adxxx-0x008b2xxx` cluster is `WSAIEscalation.cpp`; the `0x008e8xxx` cluster is the
 per-ped suspicion-state state machine; `0x0097xxxx` is `WSWillToFightGrid` rendering.
+
+> **Only 4 of the 17 rows below carry a `Class::Method` assertion string** — `FUN_0089f840`,
+> `FUN_0089bd20`, `FUN_005a8f40`, `FUN_008ae698` (and only those four appear in
+> `data/symbol_map/pc_symbol_map.tsv`). The column header says *Proposed name* for good reason; the
+> section title "Pinned" overstates it. A `grep` for
+> `"WS(WillToFight|Suspicion|Escalation)[A-Za-z]*::[A-Za-z_~]+"` over the whole decomp returns **0
+> matches**, so no name here can be string-confirmed beyond those four.
+>
+> **The class qualifiers `WSSuspicion::`, `WSSuspicionState::` and `WSSuspicionCensus::` are
+> fabricated** — none of those classes exists in `data/rtti_classes_all.txt`,
+> `data/ws_engine_classes.txt`, or anywhere in the decomp (verified: 0 occurrences each).
+> `FUN_008e8a90` / `FUN_008e8c35` / `FUN_008e8d40` are best read as **free functions over the global
+> census array `DAT_0143ec04[]`**, which is what their bodies actually show.
+>
+> The RTTI claims this doc *does* make are sound: `WSAISuspicionRadius` and
+> `WSHUDSuspicionMeterBlueprint` are both genuinely present (as `?$PblTree@…` mangled forms).
 
 | VA | Proposed name | Evidence |
 |----|---------------|----------|

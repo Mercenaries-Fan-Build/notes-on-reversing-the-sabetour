@@ -49,7 +49,7 @@ district name literal (`"Paris_1_Mission_1"`) to begin streaming the level.
 | VA | Proposed name | Anchor |
 |---|---|---|
 | `FUN_009ca1a0` | `WSInteriorManager::TeleporterMain` | `WSInteriorManager.cpp` / `TeleporterMain`,0x659; interior state machine |
-| `FUN_009cb240` | `WSInteriorManager::SetInteriorState` | only caller is TeleporterMain, always with a state constant (inferred) |
+| `FUN_009cb240` | `WSInteriorManager::SetInteriorState` | ⚠️ **REFUTED 2026-07-24:** ~~only caller is TeleporterMain~~ — it has **many** callers (7 sites in `FUN_009ca1a0` alone, plus `FUN_009cab40`, `FUN_009cb7c0`, `FUN_009cb3f0`, …). The name remains **inferred**. |
 | `FUN_009ccb50` | `WSLoadDisplayManager::Update_Flow` | `WSLoadDisplayManager.cpp` / `Update_Flow`,0x119; drives streaming start |
 | `FUN_00654180` | `WSSaveLoadManager::StartReturnToHQ` | `WSSaveLoadManager.cpp` / `StartReturnToHQ`,0x944; restreams world via `DAT_01240328` |
 | `FUN_00654d30` | `WSSaveLoadManager::Update` (dispatcher) | size-4652 fan-out over the `WSSaveLoadManager` method cluster (inferred) |
@@ -65,10 +65,10 @@ From `ws_engine_classes.txt` the fixed task set is: `WSGameTask`, `WSRenderingTa
 `WSLoadingMonitorTask`, `WSLegalTask`). Boot is sequenced by the Context classes
 (`WSApplicationContext`, `WSBootupContext`, `WSMiniBootContext`, `WSLoadingContext`,
 `WSIngameContext`). **None of the per-frame `Task::Run` methods could be tied to a VA** — they
-are pure vtable dispatch with no assert strings; pinning them requires the RTTI vtable→VA map.
+are pure vtable dispatch with no assert strings; pinning them requires the RTTI vtable→VA map, which ✅ now exists ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)) but has not been applied here.
 
 ## Gaps
-- **Task ring unpinned.** No `Task::Run` VA — needs the vtable→VA map.
+- **Task ring unpinned.** No `Task::Run` VA — resolvable from the vtable→VA map ([`pc_vtables.tsv`](../../data/symbol_map/pc_vtables.tsv)), which now exists; not yet applied.
 - **Frame tick unnamed.** The loop that ticks the load managers is a caller at raw
   `0x00439094`/`0x0043909f`, inside an un-headered decomp region (no `FUN_` between 0x438864
   and 0x439420).

@@ -12,13 +12,20 @@ No Mercs 2 analog — this is a from-scratch format for this project (Mercs 2 us
 +0x04  u32  block align (2048)
 +0x08  u32  version (2)
 +0x0C  u32  bankCount
-+0x10  u32  (unused here)
++0x10  u32  bankTableOffset    = 0x1C on all 10 retail packs
 +0x14  u32  streamCount
-+0x18  u32  (unused here)
-+0x28  record table: 12-byte entries { u32 id, u32 size, u32 offset(absolute) }
++0x18  u32  streamTableOffset  = bankTableOffset + bankCount*12 (sub-tables are contiguous)
++0x1C  record table: 12-byte entries { u32 id, u32 size, u32 offset(absolute) }
         - first  bankCount   records → .bnk soundbanks (magic BKHD; hold embedded SFX wems in DIDX/DATA)
         - next   streamCount records → loose .wem streams (magic RIFF) = the VO / music lines
 ```
+
+**⚠️ The table starts at `+0x1C`, not `+0x28`.** Read the offset from `+0x10` rather than hardcoding it.
+Verified across all 10 retail `.pck`: at `+0x1C` every one of the 82,575 records validates by magic
+(`BKHD` for the first `bankCount`, `RIFF` for the rest) with **0** failures; reading from `+0x28`
+skips the first record and reads one past the end, mis-reading **exactly 2 records per pack**. The
+fields at `+0x10`/`+0x18` — previously documented as "unused" — are what prove it: `+0x10` literally
+holds `28` (= `0x1C`), and `+0x18` holds `0x1C + bankCount*12` on every pack.
 
 - Streamed `.wem` codec = **Wwise Vorbis** (`fmt` tag `0xFFFF`, 32 kHz, mono/stereo). ffmpeg can't
   decode this; **vgmstream** can (it rebuilds the Wwise codebooks). wem IDs are unique within a pack.
@@ -52,9 +59,14 @@ cargo run --release -- \
 ```
 Flags: `--keep-wem`, `--no-decode`, `--limit N` (test subset), `--batch N`.
 
-**Result:** all 4 languages VO extracted → **80,872 WAV** (100% of decodable streams; only 8 non-RIFF
-placeholders skipped), ~12 GB. Named by Wwise ID (`eng_main_<id>.wav`). Output is gitignored; regenerate
-from your own install.
+**Result:** all 4 languages VO extracted → **80,880 WAV**, ~12 GB. Named by Wwise ID
+(`eng_main_<id>.wav`). Output is gitignored; regenerate from your own install.
+
+> **Corrected 2026-07-24.** This previously read "80,872 WAV (100% of decodable streams; only 8
+> non-RIFF placeholders skipped)". There are no placeholder records: those 8 "non-RIFF" entries were
+> the `+0x28` off-by-one above, one per pack across the 4 languages × (main + DLC). The extractor
+> was silently losing 1 real stream per pack. Both the tool and the layout above are now fixed; the
+> true total is 80,880 (20,741 + 20,082 + 19,914 + 20,063 main, + 20 each DLC).
 
 ### ⚠️ vgmstream batch gotcha
 vgmstream-cli overflows a static argv buffer at ~400 file args (starts reading garbage as options,

@@ -236,7 +236,11 @@ units to *that* inventory". The corpus only ever uses the first overload.
 compares, so negatives wrap and are rejected). That is a concrete game-logic fact recoverable
 nowhere else in the seam: **10 perk categories, 3 tiers each**. The `Perksv3.` prefix on every
 perk name the corpus passes to `SetPerkAvailable` ("Perksv3.FriendlyFireTitle",
-"Perksv3.NotoriousTitle", "Perksv3.DoubleAgentTitle") dates the system to a third design revision.
+"Perksv3.NotoriousTitle", "Perksv3.DoubleAgentTitle") plausibly *dates the system to a third design
+revision* — but that reading is **inferred**, not byte-confirmed: `Perksv3.` does **not** occur anywhere in
+`Saboteur.exe` (0 hits, ASCII or UTF-16). It is a GameText / Flash lookup key living in script and asset
+data, not a binary symbol, so the binary says nothing about what the `v3` means. *(marked inferred
+2026-07-24)*
 
 Perk *presentation* is Flash: the exe carries `exSetPerkLevel`, `exSetPerkRewards`,
 `exSetPerkReqs`, `exSetPerkPopupInfo`, `exSetPerkFlavors`, `exSetPerkCategoryTitle` as literals —

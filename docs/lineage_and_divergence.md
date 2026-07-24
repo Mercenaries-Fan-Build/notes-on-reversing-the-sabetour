@@ -43,7 +43,7 @@ re-verified against the Saboteur binary/assets before you rely on it.
 | **Havok** | **5.5** (`hkaWaveletSkeletalAnimation` etc., HK550 structs) | **6.5** (`hkaWaveletCompressedAnimation`, `hkaSplineCompressedAnimation`, +spline) | ⚠️ our verified 5.5 decoder does NOT transfer byte-for-byte; struct offsets & quantization changed. Algorithm (inverse-Haar lifting) is the same → re-derive 6.5 from the clean decomp |
 | **Animation pack** | `animgroup` blocks in `vz.wad` | `AP0L` `animations.pack` (ANIM/SEQC/TRAN/EDGE/BANK/SSP0…) + one concatenated HKX blob | Full FSM graph exposed |
 | **Engine codename / RTTI** | Mercs 2 engine (mostly `FUN_*`, SecuROM-obscured) | WildStar/Odin, **2,765 RTTI names in the clear** | Saboteur gives a symbol map Mercs 2 lacked |
-| **UI** | Scaleform GFx 2.0.48 | Scaleform GFx (present; version TBD) | verify version |
+| **UI** | Scaleform GFx **2.0.48** | Scaleform GFx **3.0.71** | ✅ resolved 2026-07-24 — a **major** version apart. The exe carries it in the clear at file offset `0xC672A0`: `gfxVersion\0\0` `3.0.71\0\0` `gfxArg\0\0` `gfxLanguage`. Assume no GFx API/struct detail transfers. |
 | **Reimplementation** | active 64-bit Rust/wgpu reimpl program | not a goal here (yet) | N/A |
 
 ## Rule of thumb
