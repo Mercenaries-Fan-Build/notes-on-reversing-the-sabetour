@@ -11,7 +11,7 @@ for how each of these differs from Mercenaries 2 — **do not** assume Mercs 2 U
   └── SBLA sub-pack (magic "ALBS" LE)      per-asset bundle (meshes/textures/physics/layout)
         └── MSHA wrapper                    wraps a MESH (metadata) + .dat (VB/IB) pair, with name + comp info
               └── MESH                       flat model
-        └── DTEX                             standalone texture (own doc TBD)
+        └── DTEX                             standalone texture (see "DTEX texture blob" below)
   compression: sges (SEGS)                   same as Mercs 2, byte-identical
 ```
 
@@ -30,6 +30,75 @@ On-disk containers (retail install):
 Megapack index entry (`megapack.hpp`): `{ uint32 crc; uint32 index; uint32 size; uint64 offset; }`.
 No embedded path strings (unlike Mercs 2 PTHS) — hash-only, resolved via an external string dictionary.
 
+## Byte order & the two FourCC conventions  ★ read before writing anything
+
+Everything numeric is **little-endian** — every `u16`/`u32`/`u64` (counts, sizes, offsets, CRCs, w/h/mips,
+the `21` = B8G8R8A8 texture-format id). The one trap is the FourCC magics, and there are **two conventions
+in the same files**, both verified against real bytes *and* the engine's own compare constants:
+
+| Magic | Kind | Source constant | On disk | Engine compares (decomp) |
+|---|---|---|---|---|
+| megapack | Pandemic container | `'MP00'` = `0x4D503030` | **`00PM`** (reversed) | `iVar4 == 0x4d503030` |
+| SBLA bundle | Pandemic container | `'SBLA'` = `0x53424C41` | **`ALBS`** (reversed) | `iVar3 == 0x53424c41` |
+| global.map | Pandemic container | `'MAP6'` = `0x4D415036` | **`6PAM`** (reversed) | `iVar3 == 0x4d415036` |
+| DTEX format | D3D `MAKEFOURCC` | `DXT1` = `0x31545844` | **`DXT1`** (forward) | `param_1 == 0x31545844` (also `DXT3`/`DXT5`) |
+
+Pandemic's container tags are C multi-character constants (first char in the **high** byte), so LE
+serialization writes them **reversed** on disk (`00PM`, `ALBS`, `6PAM` — this is why the repo's `MP00`/
+`SBLA`/`MAP6` names look "backwards" versus a hex dump). The texture-format tags come from DirectX's
+`MAKEFOURCC` (first char in the **low** byte), so they land **forward** (`DXT1`). Both describe the same 4
+bytes from opposite ends.
+
+> **Byte-right rule:** treat every magic as an opaque 4-byte sequence — read it raw, compare by bytes, write
+> it back verbatim. Never rebuild a magic by packing its pretty name; you'd have to know which convention it
+> follows. (This is exactly why a verbatim-copy rebuild round-trips and a name-reconstructed one may not.)
+
+## Megapack on-disk layout — writing a loadable one
+
+The reader-facing struct above is not the whole file. Verified byte-for-byte against `Dynamic0`,
+`Palettes0`, and `Mega0`, and matched to the loader `FUN_00e428c0` @ `0x00e428c0`:
+
+```
+'00PM' | count:u32
+  main TOC   : count × { crc:u32; index:u32; size:u32; offset:u64 }   (20 bytes)   ← the documented struct
+  index tbl  : count × { crc:u32; index:u32 }                         (8 bytes)    ★ SECOND table, easily missed
+  0xCB pad   → first blob (0x800-aligned)
+  blobs        each at its TOC `offset`, 0x800-aligned, 0xCB filler between
+```
+
+- **The second `(crc,index)` table is real and engine-loaded** — the loader allocates a `count*8` array
+  (`param_1[0xf6]`) and fills it in a read loop *after* the main TOC; on disk it mirrors the TOC's
+  `(crc,index)` in the same order. A rebuild that emits `header + TOC + blobs` and treats the rest as
+  padding **drops it**, producing a file that *inspects* fine (reading only needs the main TOC) but is
+  malformed for load. *(Table existence & engine read: confirmed. That omitting it is fatal: strong
+  inference, not yet game-tested.)* Both known community writers currently omit it (`toc_start =
+  align(8 + count*20)`), and neither self-tests a full-megapack byte match — see
+  [`../community_tooling.md`](../community_tooling.md).
+- **`offset` is `u64`** (record is 20 bytes, not 16). Packing it as `u32` desyncs every entry after the first.
+- **The `0xCB` inter-blob filler is inert** — the loader fetches each blob by TOC `offset`+`size` and never
+  reads the gaps; `0x00` filler loads fine. The pad *value* is not a correctness constraint (matching vanilla
+  is only cosmetic).
+- **`crc` is a lookup key, not a content checksum** — reuse each entry's original `crc` for a modified blob
+  (the patch-layer approach depends on this).
+- Resizing a blob means recomputing **all** later `offset`s to `0x800` alignment and rewriting both tables.
+
+### DTEX texture blob — the decompressed contract
+Inside an SBLA bundle a texture is a DTEX blob: `u32 nameLen; char name[]; u32 format(DXT1/DXT5/21);
+u32 unk; u16 w,h,mips; u32 uncompressedSize; u32 numStreams; numStreams × { u32 len; zlib(chunk) }`.
+Two details that bite (documented by the community "Saboteur Toolkit"; **byte-verified here** on retail
+`Dynamic0`): concatenating the decompressed streams gives one logical stream with a **24-byte header before
+*each* mip** (`{mipIdx,w,h,0,1,mipSize}`), so `uncompressedSize == Σ mipSizes + 24·numMips`; and streams are
+fixed **1.5 MiB (`0x180000`) uncompressed chunks**, each zlib'd separately. Get the interleave wrong and the
+engine's mip walk desyncs and it **crashes before the menu**. The engine only consumes the *decompressed*
+stream, so a modified texture need not reproduce vanilla compressed bytes — the integrity gate is this
+invariant, not a byte match.
+
+> **Cross-SKU note:** the asset containers are byte-identical between the GOG and Steam builds
+> (`Dynamic0`/`Palettes0` sha256-equal, `global.map` identical). `loosefiles_BinPC.pack` differs by exactly
+> one 20-byte high-entropy region inside `France.shaders` (a per-copy DRM/SKU watermark) — irrelevant to any
+> megapack/texture mod, but a full `loosefiles` rebuilder would need to preserve it per SKU. So a byte-right
+> mod built against one storefront is byte-right on the other.
+
 ## Asset override — the built-in patch layer  ★ the "vz-patch.wad parallel"
 
 Decomp-confirmed (mounter `FUN_00e34f70(name, 1, 0x600, 0x180, priority)`; caller ~`FUN_009f2xxx`).
@@ -47,8 +116,10 @@ Each mount is guarded by a "slot == -1" check (mount once). This is "highest-pri
 
 **To mod an asset:** build a megapack containing the replacement `SBLA`/`MSHA` under the **same asset
 hash**, name it `patchmega0.megapack` (or `patchdynamic0`/`patchpalettes0`), drop it next to the base
-pack. No base rebuild, no block-injection surgery — much cleaner than Mercs 2's WAD overlay. (Writer
-tool not yet built — see [`../community_tooling.md`](../community_tooling.md).)
+pack. No base rebuild, no block-injection surgery — much cleaner than Mercs 2's WAD overlay. For the exact
+byte layout a writer must reproduce (including the second index table both community tools miss), see
+"Megapack on-disk layout" above; for the community texture writer, see
+[`../community_tooling.md`](../community_tooling.md).
 
 ## MESH format (from SaboteurToolset `mesh/mesh_to_gltf.cpp`, cross-checked vs decomp)
 

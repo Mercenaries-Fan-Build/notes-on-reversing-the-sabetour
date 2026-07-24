@@ -34,7 +34,7 @@ entries are packed 21-wide. Reading them at 24-byte stride desyncs immediately.
 
 | Off | Type | Meaning | Evidence |
 |---|---|---|---|
-| `+0x00` | u32 | **name hash** — hash-map key | key into `FUN_007069d0`; looked up by `FUN_00706910`. **Preimage still OPEN — see below** |
+| `+0x00` | u32 | **name hash** — `pandemic_hash("d:\" + Scripts-relative + ".luac")` | ✅ 321/321. Key into `FUN_007069d0`; looked up by `FUN_00706910` (a red-black tree find). **[Solved — see below](#-solved-0x00-is-the-hash-of-the-runtime-lookup-name)** |
 | `+0x04` | u32 | **`pandemic_hash(basename without extension)`** | ✅ reproduces **321/321** (`AttackAction`, `Checkpoint`, …) |
 | `+0x08` | u32 | **absolute file offset** of the chunk | `FUN_007063f0`: `*(desc+8) + *(this+8)`, where `this+8` is the whole-file buffer |
 | `+0x0C` | u32 | stored size | `== +0x10` on all 321 entries |
@@ -66,20 +66,29 @@ binary rather than assumed.
 > `(h * PRIME) ^ 0x2A` is wrong and silently produces plausible-looking garbage. Case-folding is
 > `| 0x20` on the raw byte, so `\` (0x5C) folds to `|` (0x7C) — it is *not* a `tolower()`.
 
-## Open: what does `+0x00` hash?
+## ✅ Solved: `+0x00` is the hash of the **runtime lookup name**
 
-The map key does not reproduce from the embedded source path. Ruled out empirically across all 321
-entries: every path normalization tried (full dev path, `Scripts`-relative, `BinCommon`-relative,
-basename, with/without `.lua`, with/without leading separator, forward/backslash), plus `crc32` and
-`adler32` of the chunk bytes. All 321 values are unique.
+```
++0x00 == pandemic_hash("d:\" + <Scripts-relative path> + ".luac")
+```
 
-Most likely it hashes the **runtime lookup name** — whatever string the calling script passes to
-`require`/`dofile`, built by `FUN_00706190` (which normalizes `/`→`\` and conditionally appends a
-suffix from `DAT_00fdc414`). That name need not equal the compile-time debug path. Resolving
-`DAT_00fdc408` / `DAT_00fdc40c` / `DAT_00fdc414` from `.rdata` would settle it.
+✅ Reproduces **321/321** against retail `LuaScripts.luap`, and round-trips from 26/26 real `require()`
+strings in the Lua corpus. Worked example:
+`pandemic_hash("d:\Scripts\Includes\WRAPPER_Util.luac") == 0xda8b14f5`.
 
-**This does not block anything** — the LuaQ debug info gives the real source path for all 321 chunks,
-so extraction and naming work without it.
+The standing hypothesis above was right: it hashes the **runtime lookup name**, not the compile-time
+debug path. The name is built by `FUN_00706190` @ `0x00706190` from three `.rdata` constants that this
+doc previously flagged as "would settle it" — now read out of the image: `DAT_00fdc408` = `"d:\"`
+(prefix) and `DAT_00fdc414` = `".luac"` (the extension the loader *substitutes* for `.lua`).
+
+That extension swap is why the earlier sweep missed it: `Scripts`-relative **was** tried, but only ever
+with the `.lua` the debug path carries. The preimage is neither the shipped path nor the shipped
+extension — it is the `d:`-rooted `.luac` name the engine synthesizes at `require` time.
+
+Lookup is a **red-black tree find** (`FUN_00706910`), not a hash bucket — see
+[`../sab-engine-lua-seam/04-vm-lifecycle-and-script-objects.md`](../sab-engine-lua-seam/04-vm-lifecycle-and-script-objects.md),
+which derives this and traces the full `require` path through `Util.LuaHook_Require`, spliced into stock
+Lua 5.1's `package.loaders` at position 2.
 
 ## Payload
 
@@ -115,5 +124,8 @@ and `strings.txt`. Self-tests `pandemic_hash` and validates chunk contiguity bef
 - Format: ✅ confirmed against retail.
 - `pandemic_hash`: ✅ confirmed (`FUN_00dc1e20`).
 - Extractor: ✅ built, 321/321.
-- Decompilation to source: ⏳ blocked — `unluac.jar` needs a JRE, none installed.
-- `+0x00` preimage: ❌ open (non-blocking).
+- Decompilation to source: ✅ done — 321 sources at [`../saboteur-luacd/src`](../saboteur-luacd/src).
+- `+0x00` preimage: ✅ **solved** — `pandemic_hash("d:\" + Scripts-relative + ".luac")`, 321/321.
+
+> The engine side of these scripts — all 898 bindings, the marshalling ABI, handles, and the callback
+> path — is reversed in [`../sab-engine-lua-seam/`](../sab-engine-lua-seam/README.md).

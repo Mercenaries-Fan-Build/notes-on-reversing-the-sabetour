@@ -10,11 +10,61 @@ decomp (regenerate via `tools/ghidra/DecompileSaboteur.java`; output is gitignor
 |---|---|---|---|
 | [**PredatorCZ/SaboteurToolset**](https://github.com/PredatorCZ/SaboteurToolset) | C++ | anim/mesh/material/texture/map/lua/megapack **extract** | research + extract-only |
 | [**BoBoBaSs84/SabTool**](https://github.com/BoBoBaSs84/SabTool) (fork of [Blumster/SabTool](https://github.com/Blumster/SabTool)) | C# | content read/extract, some pack handling | "mostly reading and extracting currently" |
+| [**gamelaster/LuapExplorer**](https://github.com/gamelaster/LuapExplorer) | C# | `.luap` **extract / import / edit** — auto-decompiles Lua inside the pack | v1.0 (Dec 2017), minimal upkeep |
+| [**saboteur-team/sab-lua-api**](https://github.com/saboteur-team/sab-lua-api) | Lua | Lua API **stubs / definitions** (library folder), MIT | reference / defs |
+| [**ArcanePlant/FileConvTool**](https://github.com/ArcanePlant/FileConvTool) | Python | "tools for games" — file conversion; README failed to load, exact format scope **unverified** | unverified |
+| [**Daniel-McCarthy/Saboteur-GameTemplates-Helper**](https://github.com/Daniel-McCarthy/Saboteur-GameTemplates-Helper) | C++ | parses **`AULB`** game-template files (`.wsd`/`.pack`): template metadata + hash/value pairs, list/search | read-only helper |
+| **"Saboteur Toolkit"** (shared 2026-07 by a community member; not ours) | Python | texture **extract + write/repack** (megapack/ALBS/DTEX) + AI-upscale pipeline + patch-megapack builder | **first write-capable tool** (see below) |
 | [Saboteur Team wiki](https://saboteur-team.github.io/wiki/) | — | docs/format notes | reference |
 | [Nexus](https://www.nexusmods.com/games/thesaboteur) / [ModDB](https://www.moddb.com/games/the-saboteur) mods | — | texture/script tweaks | consumer-level |
 
 The whole scene is **extraction-oriented**. The comparison already established Pandemic write/repack
 tooling is the universal gap. Two capabilities are *hard-blocked* for them; several more we can strengthen.
+
+### Research assets & references (received 2026-07 from a community mod maker)
+
+- **Pre-release build: The Saboteur (2008-05-20)** — a [7z archive](https://www.mediafire.com/file/t7mh5jiy7bq2g8m/The_Saboteur_(2008-05-20).7z/file)
+  of an early build, ~18 months before the 2009 retail. **High RE value, not yet obtained locally:**
+  pre-release Pandemic builds are frequently less-stripped (possible debug data / symbols) and can carry
+  older or looser asset formats. A retail-vs-2008 diff is a strong lead — see the queued task below.
+- **Mission catalog** — a [community Google Sheet](https://docs.google.com/spreadsheets/d/12oW0kqT4ZXQDrv0Q9z9yCwqTrjSbKcyIbkB-hAwMBlw/edit)
+  enumerating the game's missions; a naming reference for when we work through the Lua mission scripts.
+- **Lua cross-checks for our cracked `.luap`**: **LuapExplorer** (independent C# `.luap` reader/editor)
+  and **sab-lua-api** (Lua API stub set) are useful to validate our format notes and to annotate the
+  898 named Lua bindings — we already decompiled all 321 scripts, so these are corroboration, not new capability.
+- **`AULB` game-template format** — surfaced by Daniel-McCarthy's helper; a template tag (`.wsd`/`.pack`)
+  **not yet documented in this repo**. Worth cataloguing in `docs/formats/` once cross-checked against the decomp.
+- A [Google-Drive-hosted text-editor tool](https://drive.google.com/file/d/1qdNvdbsKGyXTN__nMub4mUcosQG1HfzF/view)
+  was also shared; scope not yet inspected.
+- **"Saboteur Toolkit"** (Python) — shared privately 2026-07 by a community member; **third-party work, not
+  authored here**, kept locally (not redistributed). It is the **first tool that can *write* the texture
+  format**, not just read it: extract → (AI-)upscale → repack into an additive patch megapack. Its author
+  credits PredatorCZ's [SaboteurToolset](https://github.com/PredatorCZ/SaboteurToolset) for the read/DTEX
+  groundwork and states the write/repack side was worked out independently. Safety-reviewed on receipt: the
+  Python is clean (no `exec`/`eval`/pickle; downloads only from Microsoft + HuggingFace/GitHub over HTTPS),
+  the bundled `texconv.exe` carries a valid Microsoft Authenticode signature, and the only game-dir writes
+  are additive patch megapacks + a vanilla backup. (Caveat for anyone running it: the bundled `.pth` upscale
+  models are pickle files — re-fetch them from the official URLs via its `get_tools.py` rather than trusting
+  bundled copies.)
+
+  Format specifics **it documents and byte-verifies** (attributed to the toolkit; consistent with our
+  [`archive_and_models.md`](formats/archive_and_models.md), not independently re-derived here):
+  - **DTEX per-mip headers are interleaved** — a 24-byte header `{mipIdx,w,h,0,1,mipSize}` precedes *each*
+    mip in the concatenated stream, so `uncompressedSize == Σ mipSizes + 24·numMips`. Getting this wrong
+    desyncs the engine's mip walk and crashes before the menu (their empirical note — a rule our clean
+    decomp's DTEX loader could *explain* engine-side, which theirs cannot: see §4).
+  - **Multistream = fixed 1.5 MiB (`0x180000`) uncompressed chunks**, each zlib'd separately;
+    `uncompressedSize` is the total.
+  - **ALBS bundle** (their `'ALBS'` FourCC = our little-endian **SBLA**, cf. `tools/sab_sbla`): `DynFile`
+    offsets are relative to the *end of the tables*, not the bundle start.
+  - **Independently confirms the patch-megapack override layer** (`patchdynamic0.megapack`,
+    `patchpalettes0.megapack`, `patchmega0..2`) that §4 / [`binary_recon.md`](binary_recon.md) describe —
+    they verified the engine opening `patchdynamic0.megapack` with Process Monitor.
+
+  Note their premise — *"Saboteur.exe is SecuROM-packed, so static analysis is useless"* — is true only of
+  the **retail/Steam packed** exe they work from; our GOG copy is the SecuROM-**unpacked** twin (non-`.text`
+  sections byte-identical), so our decomp reads the engine-side loaders theirs cannot. A concrete thing worth
+  sharing back.
 
 ## What they explicitly CANNOT do (our biggest openings)
 
@@ -60,11 +110,17 @@ would let every other tool author work from ground truth instead of guessing.
 ## What we can strengthen (they have partial coverage)
 
 ### 4. Repack / write + the built-in patch layer
-Community is extract-only. We have WAD-write experience and, from the decomp, the **built-in override
-mechanism**: the engine mounts `patchmega0.megapack` / `patchdynamic0.megapack` /
+**Update 2026-07: no longer fully extract-only** — the community-shared "Saboteur Toolkit" (above) now
+writes the **texture** path (megapack/ALBS/DTEX) into additive patch megapacks, and independently confirmed
+the **built-in override mechanism**: the engine mounts `patchmega0.megapack` / `patchdynamic0.megapack` /
 `patchpalettes0.megapack` at ~1000× base priority (hash wins) — a clean, no-surgery mod path (see
-[`binary_recon.md`](binary_recon.md)). Contribution: a megapack *writer* + documentation of the patch layer so
-modders can ship overrides without touching base archives.
+[`binary_recon.md`](binary_recon.md)). That closes the texture-writer gap from their side.
+
+Where our clean decomp still uniquely helps: (a) the **engine-side loader semantics** behind the crash-rules
+they found empirically (e.g. the interleaved-mip walk that crashes on desync — readable in our unpacked
+`.text`, opaque in their SecuROM-packed exe); and (b) **writers for the other asset classes** — mesh, Havok
+anim, audio — that remain read-only or unhandled community-wide. Contribution shape shifts from "build a
+texture writer" (done) to "explain the format from the binary + extend write support beyond textures."
 
 ### 5. Hash → name resolution
 `pandemic_hash` is byte-identical between the games. We have a **733k-entry rainbow table** + a large
@@ -83,11 +139,19 @@ fields with real semantics.
 3. **Havok 6.5 anim decoder** — the crown jewel; scope as a real project, re-derive 6.5 offsets from
    our clean decomp using the 5.5 algorithm as scaffold. Coordinate with PredatorCZ (owns the AP0L
    metadata pairing) so their extractor feeds our decoder.
-4. **Megapack writer + patch-layer docs**, then **hash resolution** and **material semantics** as
-   incremental strengthening.
+4. **Engine-side loader semantics + non-texture writers** — the texture writer + patch-layer now exist on
+   the community side (§4); our unique add is explaining the format from the clean binary and extending
+   write support to mesh/anim/audio. Then **hash resolution** and **material semantics** as incremental
+   strengthening.
 
 ## Sources
 - SaboteurToolset — https://github.com/PredatorCZ/SaboteurToolset
 - SabTool — https://github.com/BoBoBaSs84/SabTool
+- LuapExplorer — https://github.com/gamelaster/LuapExplorer
+- sab-lua-api — https://github.com/saboteur-team/sab-lua-api
+- FileConvTool — https://github.com/ArcanePlant/FileConvTool
+- Saboteur-GameTemplates-Helper — https://github.com/Daniel-McCarthy/Saboteur-GameTemplates-Helper
 - Saboteur Team wiki — https://saboteur-team.github.io/wiki/
 - Nexus/ModDB Saboteur — https://www.nexusmods.com/games/thesaboteur , https://www.moddb.com/games/the-saboteur
+- Pre-release build (2008-05-20) — https://www.mediafire.com/file/t7mh5jiy7bq2g8m/The_Saboteur_(2008-05-20).7z/file
+- Mission catalog (community sheet) — https://docs.google.com/spreadsheets/d/12oW0kqT4ZXQDrv0Q9z9yCwqTrjSbKcyIbkB-hAwMBlw/edit
