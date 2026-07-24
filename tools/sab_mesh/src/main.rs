@@ -18,7 +18,7 @@
 //!
 //! Layout confirmed from PredatorCZ/SaboteurToolset (`mesh/mesh_to_gltf.cpp` struct Read()
 //! methods + the format proxy table + ProcessStream/ProcessMesh) and cross-checked
-//! byte-for-byte against real assets (see MESH_GEOMETRY_FORMAT.md).
+//! byte-for-byte against real assets (see docs/formats/mesh_geometry.md).
 
 // Several parsed fields/helpers document the on-disk MESH format without being
 // read on the extraction hot path.

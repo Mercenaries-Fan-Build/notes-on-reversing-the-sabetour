@@ -24,7 +24,7 @@ Pages 2–4 replace the old Textures/Materials/Rig tabs with a data editor over 
 - **Icons** — scan a megapack for its DTEX texture names and their `pandemic_hash`, and hash any name
   you plan to pack, so you can wire a custom icon into a template's texture value. (Packing the DTEX
   itself is done with `sab_dtex` / `sab_pack`; the format chain is documented in
-  `../../docs/formats/gametext.md` and `../sab_gametemplates/GAMETEMPLATES_FORMAT.md`.)
+  `../../docs/formats/gametext.md` and `../../docs/formats/gametemplates.md`.)
 
 The original character/animation viewer is unchanged and is page 1.
 

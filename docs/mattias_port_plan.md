@@ -89,7 +89,7 @@ lists, `faceType==1`), 4-bone skin (UNORM8 weights / UINT8 indices), material gr
 > + drawcalls, remapped bone indices), reusing the Stage-1 section model.
 >
 > **Skeleton-authoring question — RESOLVED** (detour 2026-07-17; see
-> [`../tools/sab_skeleton/SKELETON_FORMAT.md`](../tools/sab_skeleton/SKELETON_FORMAT.md)). The 64-byte bone
+> [`formats/skeleton.md`](formats/skeleton.md)). The 64-byte bone
 > record is fully decoded: `boneName1 == boneName0`, `unk0 == 0`, per-bone BBOX is an empty sentinel
 > (`min 0`, `max -10000`) for every non-root bone, and `boneIds` is identity. A synthesized record matched
 > **167/168** of Sean's real bytes (root differs only in BBOX). So the **entire skeleton section is

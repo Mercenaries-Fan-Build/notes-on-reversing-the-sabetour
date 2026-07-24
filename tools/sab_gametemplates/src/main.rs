@@ -1,7 +1,7 @@
 // sab_gametemplates — read / modify / write The Saboteur (2009) GameTemplates.wsd
 //
 // Container format (magic "AULB"). Verified against DLC/01/GameTemplates.wsd and
-// the game loader FUN_0162bfa0 @0x0162bfa0 (decomp). See GAMETEMPLATES_FORMAT.md.
+// the game loader FUN_0162bfa0 @0x0162bfa0 (decomp). See docs/formats/gametemplates.md.
 //
 //   char   magic[4]      = "AULB"
 //   u32    entry_count                          (little-endian)
@@ -221,7 +221,7 @@ fn known_hashes() -> HashMap<u32, &'static str> {
     // Property/value name hashes resolved so far (pandemic_hash of the ASCII name).
     // The texture-referencing properties below were reversed in RE-2: their 4-byte data is
     // `pandemic_hash(textureName)` — the same hash that keys the ALBS bundle directory and the
-    // WSTX material table, so a value resolves straight to a DTEX record. See GAMETEMPLATES_FORMAT.md.
+    // WSTX material table, so a value resolves straight to a DTEX record. See docs/formats/gametemplates.md.
     let names = [
         "Name", "Model", "Priority", "Offset", "AIAttractionPt", "none",
         // reversed from the main DB property-hash histogram:

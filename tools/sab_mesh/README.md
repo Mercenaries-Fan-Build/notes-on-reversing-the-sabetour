@@ -11,7 +11,7 @@ emits two files:
    modeled/bind pose. Untextured (v1: no materials/DTEX).
 
 It reuses `sab_skeleton`'s container + skeleton parsing verbatim and adds the vertex/index geometry
-and skinning. Byte layout: see [`MESH_GEOMETRY_FORMAT.md`](MESH_GEOMETRY_FORMAT.md).
+and skinning. Byte layout: see [`docs/formats/mesh_geometry.md`](../../docs/formats/mesh_geometry.md).
 
 ## Usage
 

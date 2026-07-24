@@ -2,7 +2,7 @@
 //! templates (disguise use-points, cars, weapons, props, lights, particles, humans…), each a bag of
 //! `{property-hash → data}` pairs. Ground-truthed against `DLC/01/GameTemplates.wsd` and the full main
 //! DB (embedded in `France/loosefiles_BinPC.pack`), and the loader `FUN_0162bfa0 @0x0162bfa0`. See
-//! `tools/sab_gametemplates/GAMETEMPLATES_FORMAT.md`.
+//! `docs/formats/gametemplates.md`.
 //!
 //! ```text
 //! Header: "AULB", u32 entry_count

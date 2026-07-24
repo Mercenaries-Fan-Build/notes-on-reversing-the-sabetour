@@ -76,7 +76,7 @@ sectors). Padding bytes are never read; real packs use filler `0xCB`, writer use
 ## Sub-pack (ALBS) — copied verbatim
 The writer copies the `[offset, offset+size)` slice, so the ALBS/MSHA/zlib bytes are preserved
 exactly; no (de)compression is needed. Sub-pack anatomy (for reference; see
-`sab_mesh/MESH_GEOMETRY_FORMAT.md`): `"ALBS"`(0x414C4253) header, then `"MSHA"`(disk `AHSM`)
+[`mesh_geometry.md`](mesh_geometry.md)): `"ALBS"`(0x414C4253) header, then `"MSHA"`(disk `AHSM`)
 wrappers `{u32 magic; u32 unc0; u32 unc1; u32 c0; u32 c1; char name[0x100]}` + two zlib blobs
 (`78 01`).
 

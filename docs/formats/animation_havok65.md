@@ -317,7 +317,7 @@ is **skeleton-less** (flat nodes) because the animation pack has **no skeleton**
 
 **The phase-2 skeleton prerequisite is now done.** `tools/sab_mesh` reads the character `MSHA`/`MESH`
 skeleton out of `Dynamic0.megapack` (parent indices, bind pose, bone name-hashes matching the AP0L `ANIM`
-track hashes) — see `tools/sab_mesh/MESH_GEOMETRY_FORMAT.md`. **`tools/sab_workshop`** is the live
+track hashes) — see [`mesh_geometry.md`](mesh_geometry.md). **`tools/sab_workshop`** is the live
 wgpu+egui previewer: it re-parents the decoded per-track TRS onto the real hierarchy and plays clips with
 GPU skinning on the textured character (DTEX resolved in-process from the megapack), with a browser that
 loads any skinned model from the pack. No decode change was needed, exactly as predicted above.
@@ -330,7 +330,7 @@ Two things that bite when previewing, both handled in `sab_workshop`:
   (`lock root`), honouring animated rotation/scale, so clips play in place.
 - **Rigid accessories.** Hats/props are UNSKINNED geometry authored at the origin, parented via the MESH
   drawcall's `parentBone` (e.g. Sean's hat → bone 18 `Bone_Head`). Dropping that field parks them at the
-  world origin. See `MESH_GEOMETRY_FORMAT.md` (SMSH v2 carries `parent_bone`).
+  world origin. See [`mesh_geometry.md`](mesh_geometry.md) (SMSH v2 carries `parent_bone`).
 
 **Still open for the previewer:** filtering the clip list to a character. A rig-compatibility test is
 *not* the answer (2155/2214 pass — see the BANK section). The deterministic answer is bank + sequence

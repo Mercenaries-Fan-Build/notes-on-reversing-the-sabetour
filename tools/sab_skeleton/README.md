@@ -29,7 +29,7 @@ reading the name directly — no `global.map`/loosefiles navigation or external 
 Character meshes are named `CH_AL_<Name>_<part>`; only skinned meshes (`numBones0 > 1`) carry a skeleton.
 
 `name_hash == boneName0 == pandemic_hash(bone name)` — the exact key the animation system uses (these
-hashes appear in `Animations.pack`'s `ANIM` bone list). See [SKELETON_FORMAT.md](SKELETON_FORMAT.md) for
+hashes appear in `Animations.pack`'s `ANIM` bone list). See [docs/formats/skeleton.md](../../docs/formats/skeleton.md) for
 the confirmed byte layout.
 
 Reference: PredatorCZ/SaboteurToolset (`mesh/mesh_to_gltf.cpp`, `include/meshpack.hpp`), cross-checked

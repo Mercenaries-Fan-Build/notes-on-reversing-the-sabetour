@@ -1,6 +1,6 @@
 # MESH geometry (skinned vertex/index) — confirmed byte layout
 
-Companion to [`../sab_skeleton/SKELETON_FORMAT.md`](../sab_skeleton/SKELETON_FORMAT.md). That doc
+Companion to [`skeleton.md`](skeleton.md). That doc
 covers the container path and the MESH header + skeleton. This doc covers everything the skeleton
 tool skips: the **MESH tail** (BoneRemaps / Streams / Primitives / DrawCalls) in the decompressed
 MESH body, and the **vertex/index buffers** in the companion `.dat`.
