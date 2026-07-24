@@ -1710,6 +1710,801 @@ pub fn retarget(f: &Flags) -> Result<(), String> {
     Ok(())
 }
 
+// ============================================================================
+// 50 Cent port — Stage A: GLB ingest -> name-map retarget -> bind-pose alignment -> SemMesh.
+//
+// Additive; the Mattias path (`build_mattias` / `port`) is untouched. Two things differ:
+//   * bone identity is a semantic NAME map (`gltf::build_remap_named`), because this rig shares no
+//     `pandemic_hash` lineage with Sean;
+//   * the source needs a real scale/axis alignment. Its mesh space is ~100x off from its own joint
+//     hierarchy and is Z-up (a Sketchfab-rip artifact), so rather than guessing a "x0.01 + swap
+//     axes" transform we SOLVE for one: least-squares fit the directly-mapped bones' bind positions
+//     onto Sean's. The residual RMS is then a real quality gate, not an assumption.
+// ============================================================================
+
+/// Stable material name for 50 Cent submesh `i` — shared by the mesh encode and the DTEX/WSAO stage
+/// so drawcall material hashes and texture records agree.
+fn fiddy_mat_name(i: usize) -> String {
+    format!("50cent_m{i}")
+}
+
+/// Is this a bone that should drive the bind-pose alignment fit?
+///
+/// Deliberately EXCLUDES the digits. There are 30 finger bones vs ~15 bones that actually define
+/// body proportions, and least-squares weights every point equally — so with fingers in, two tiny
+/// clustered hand regions outvote the whole skeleton and the fit collapses (measured: 1/143 scale,
+/// a 1.30 m character). Core-only reproduces the independent rotation-free estimate (~1/110).
+///
+/// NB `C1_Forearm` (real) vs `C1_ForeArmTwist` (helper) differ only in capitalisation, so the
+/// prefix test below intentionally keeps the former and drops the latter.
+fn is_core_align_bone(n: &str) -> bool {
+    const CORE: [&str; 10] = [
+        "C1_Pelvis", "C1_Spine", "C1_RibCage", "C1_Thigh", "C1_Calf", "C1_Foot", "C1_Toe", "C1_Clavicle", "C1_UpperArm", "C1_Forearm",
+    ];
+    n.starts_with("C1_Hand") || CORE.iter().any(|p| n.starts_with(p))
+}
+
+/// An identity 4x4 — for IBMs this means "never actually bound", not "bound at the origin".
+fn is_identity_m4(m: &[f32; 16]) -> bool {
+    const I: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+    m.iter().zip(I.iter()).all(|(a, b)| (a - b).abs() < 1e-6)
+}
+
+/// Inverse of an affine column-major 4x4. `inverse(IBM)`'s translation is the bone origin in mesh space.
+fn m4_affine_inverse(m: &[f32; 16]) -> [f32; 16] {
+    let g = |r: usize, c: usize| m[c * 4 + r] as f64;
+    let (a, b, c2) = (g(0, 0), g(0, 1), g(0, 2));
+    let (d, e, f2) = (g(1, 0), g(1, 1), g(1, 2));
+    let (h, i2, j2) = (g(2, 0), g(2, 1), g(2, 2));
+    let det = a * (e * j2 - f2 * i2) - b * (d * j2 - f2 * h) + c2 * (d * i2 - e * h);
+    let id = if det.abs() < 1e-20 { 0.0 } else { 1.0 / det };
+    let r = [
+        (e * j2 - f2 * i2) * id,
+        -(b * j2 - c2 * i2) * id,
+        (b * f2 - c2 * e) * id,
+        -(d * j2 - f2 * h) * id,
+        (a * j2 - c2 * h) * id,
+        -(a * f2 - c2 * d) * id,
+        (d * i2 - e * h) * id,
+        -(a * i2 - b * h) * id,
+        (a * e - b * d) * id,
+    ];
+    let (tx, ty, tz) = (m[12] as f64, m[13] as f64, m[14] as f64);
+    let nt = [
+        -(r[0] * tx + r[1] * ty + r[2] * tz),
+        -(r[3] * tx + r[4] * ty + r[5] * tz),
+        -(r[6] * tx + r[7] * ty + r[8] * tz),
+    ];
+    let mut o = [0f32; 16];
+    for c in 0..3 {
+        for rr in 0..3 {
+            o[c * 4 + rr] = r[rr * 3 + c] as f32;
+        }
+    }
+    o[12] = nt[0] as f32;
+    o[13] = nt[1] as f32;
+    o[14] = nt[2] as f32;
+    o[15] = 1.0;
+    o
+}
+
+/// Uniform-scale similarity transform: p' = s*R*p + t. `r` is row-major 3x3.
+#[derive(Clone, Copy)]
+struct Similarity {
+    s: f32,
+    r: [f32; 9],
+    t: [f32; 3],
+}
+
+impl Similarity {
+    fn point(&self, p: [f32; 3]) -> [f32; 3] {
+        let rp = self.rot(p);
+        [self.s * rp[0] + self.t[0], self.s * rp[1] + self.t[1], self.s * rp[2] + self.t[2]]
+    }
+    fn rot(&self, p: [f32; 3]) -> [f32; 3] {
+        [
+            self.r[0] * p[0] + self.r[1] * p[1] + self.r[2] * p[2],
+            self.r[3] * p[0] + self.r[4] * p[1] + self.r[5] * p[2],
+            self.r[6] * p[0] + self.r[7] * p[1] + self.r[8] * p[2],
+        ]
+    }
+}
+
+/// Umeyama/Horn least-squares similarity fit of `src` onto `dst` (paired, equal length).
+/// Rotation via the largest eigenvector of Horn's 4x4 quaternion matrix (power iteration with a
+/// Gershgorin shift to make it positive definite). Returns the transform and the RMS residual.
+fn sim_fit(src: &[[f32; 3]], dst: &[[f32; 3]]) -> Result<(Similarity, f32), String> {
+    let n = src.len();
+    if n < 3 || dst.len() != n {
+        return Err(format!("similarity fit needs >=3 paired points (got {n} / {})", dst.len()));
+    }
+    let mean = |v: &[[f32; 3]]| {
+        let mut c = [0f64; 3];
+        for p in v {
+            for k in 0..3 {
+                c[k] += p[k] as f64;
+            }
+        }
+        [c[0] / n as f64, c[1] / n as f64, c[2] / n as f64]
+    };
+    let (cs, cd) = (mean(src), mean(dst));
+    let sc: Vec<[f64; 3]> = src.iter().map(|p| [p[0] as f64 - cs[0], p[1] as f64 - cs[1], p[2] as f64 - cs[2]]).collect();
+    let dc: Vec<[f64; 3]> = dst.iter().map(|p| [p[0] as f64 - cd[0], p[1] as f64 - cd[1], p[2] as f64 - cd[2]]).collect();
+
+    // H[a][b] = sum src_c[a]*dst_c[b]
+    let mut hm = [[0f64; 3]; 3];
+    for i in 0..n {
+        for a in 0..3 {
+            for b in 0..3 {
+                hm[a][b] += sc[i][a] * dc[i][b];
+            }
+        }
+    }
+    let (sxx, sxy, sxz) = (hm[0][0], hm[0][1], hm[0][2]);
+    let (syx, syy, syz) = (hm[1][0], hm[1][1], hm[1][2]);
+    let (szx, szy, szz) = (hm[2][0], hm[2][1], hm[2][2]);
+    let k = [
+        [sxx + syy + szz, syz - szy, szx - sxz, sxy - syx],
+        [syz - szy, sxx - syy - szz, sxy + syx, szx + sxz],
+        [szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy],
+        [sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz],
+    ];
+    let shift = (0..4).map(|i| (0..4).map(|j| k[i][j].abs()).sum::<f64>()).fold(0.0, f64::max);
+    let mut v = [0.5f64; 4];
+    for _ in 0..512 {
+        let mut w = [0f64; 4];
+        for i in 0..4 {
+            w[i] = (0..4).map(|j| k[i][j] * v[j]).sum::<f64>() + shift * v[i];
+        }
+        let nn = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if nn < 1e-30 {
+            break;
+        }
+        for i in 0..4 {
+            v[i] = w[i] / nn;
+        }
+    }
+    let (qw, qx, qy, qz) = (v[0], v[1], v[2], v[3]);
+    let rr = [
+        1.0 - 2.0 * (qy * qy + qz * qz),
+        2.0 * (qx * qy - qw * qz),
+        2.0 * (qx * qz + qw * qy),
+        2.0 * (qx * qy + qw * qz),
+        1.0 - 2.0 * (qx * qx + qz * qz),
+        2.0 * (qy * qz - qw * qx),
+        2.0 * (qx * qz - qw * qy),
+        2.0 * (qy * qz + qw * qx),
+        1.0 - 2.0 * (qx * qx + qy * qy),
+    ];
+    // uniform scale: s = sum (R*src_c) . dst_c / sum |src_c|^2
+    let (mut num, mut den) = (0f64, 0f64);
+    for i in 0..n {
+        let p = sc[i];
+        let rp = [
+            rr[0] * p[0] + rr[1] * p[1] + rr[2] * p[2],
+            rr[3] * p[0] + rr[4] * p[1] + rr[5] * p[2],
+            rr[6] * p[0] + rr[7] * p[1] + rr[8] * p[2],
+        ];
+        num += rp[0] * dc[i][0] + rp[1] * dc[i][1] + rp[2] * dc[i][2];
+        den += p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+    }
+    let s = if den.abs() < 1e-20 { 1.0 } else { num / den };
+    let mut r9 = [0f32; 9];
+    for i in 0..9 {
+        r9[i] = rr[i] as f32;
+    }
+    let rcs = [
+        rr[0] * cs[0] + rr[1] * cs[1] + rr[2] * cs[2],
+        rr[3] * cs[0] + rr[4] * cs[1] + rr[5] * cs[2],
+        rr[6] * cs[0] + rr[7] * cs[1] + rr[8] * cs[2],
+    ];
+    let sim = Similarity {
+        s: s as f32,
+        r: r9,
+        t: [(cd[0] - s * rcs[0]) as f32, (cd[1] - s * rcs[1]) as f32, (cd[2] - s * rcs[2]) as f32],
+    };
+    let mut se = 0f64;
+    for i in 0..n {
+        let p = sim.point(src[i]);
+        se += ((p[0] - dst[i][0]) as f64).powi(2) + ((p[1] - dst[i][1]) as f64).powi(2) + ((p[2] - dst[i][2]) as f64).powi(2);
+    }
+    Ok((sim, (se / n as f64).sqrt() as f32))
+}
+
+/// Build the 50 Cent character rigged to Sean: name-map retarget + solved bind-pose alignment.
+/// Also returns, per vertex, the index of the source glTF mesh it came from (Body / Head / DeepEye),
+/// which Stage B uses to drive the split onto Sean's HD/UB/LB part slots.
+fn build_50cent(glb: &str, skel: &str) -> Result<(SemMesh, Vec<usize>, Similarity, f32), String> {
+    let g = crate::gltf::load_glb(glb)?;
+    let sean = crate::gltf::load_sean_skel(skel)?;
+    let parents = crate::gltf::load_sean_parents(skel)?;
+    let rm = crate::gltf::build_remap_named(&g, &sean, &parents);
+    if rm.n_orphan > 0 {
+        return Err(format!("{} joints have no Sean target — refusing to rig with dropped weights", rm.n_orphan));
+    }
+
+    // Alignment correspondences: 50 Cent bone origin in MESH space (inverse-IBM translation) paired
+    // with Sean's bind-pose position for the same bone. Only 1:1 targets are used — several source
+    // bones collapse onto one Sean bone (Spine2/Spine3/RibCage -> Bone_Chest) and feeding those
+    // many-to-one pairs in would drag the fit toward the torso.
+    let bones = parse_skel(skel)?;
+    let bpos = bone_world_positions(&bones);
+    // This rip carries IDENTITY inverse-bind matrices for 20 joints the exporter never properly bound
+    // (_rootJoint, Neck, Head, the Muscle*/GunBone/Camera helpers). inverse(I) puts them at the origin,
+    // which as alignment correspondences drags the fit catastrophically (measured: pairwise-distance
+    // spread 156x with them, 2.5x without). They must be excluded — silently trusting them is what
+    // produced a half-height character. Skinning is unaffected: the encoder binds Sean's own stored
+    // IBMs (Mattias bug #5), never these.
+    let mut hits: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    let (mut n_ident, mut n_noncore) = (0usize, 0usize);
+    for (ji, d) in rm.direct_only.iter().enumerate() {
+        let Some(si) = d else { continue };
+        if is_identity_m4(&g.ibms[ji]) {
+            n_ident += 1;
+            continue;
+        }
+        if !is_core_align_bone(&g.joint_names[ji]) {
+            n_noncore += 1;
+            continue;
+        }
+        hits.entry(*si).or_default().push(ji);
+    }
+    // Many-to-one (Spine/Spine1 -> Bone_Spine1, Spine2/Spine3/RibCage -> Bone_Chest): use the
+    // CENTROID of the sources rather than dropping the pair, so the torso still anchors the fit.
+    let (mut src, mut dst) = (Vec::new(), Vec::new());
+    let mut keys: Vec<usize> = hits.keys().copied().collect();
+    keys.sort_unstable(); // deterministic fit input
+    for si in keys {
+        let jl = &hits[&si];
+        let mut c = [0f64; 3];
+        for &ji in jl {
+            let inv = m4_affine_inverse(&g.ibms[ji]);
+            c[0] += inv[12] as f64;
+            c[1] += inv[13] as f64;
+            c[2] += inv[14] as f64;
+        }
+        let k = jl.len() as f64;
+        src.push([(c[0] / k) as f32, (c[1] / k) as f32, (c[2] / k) as f32]);
+        dst.push(*bpos.get(si).ok_or("Sean bone index out of range")?);
+    }
+    println!("    alignment correspondences: {} core bones ({n_ident} identity-IBM, {n_noncore} non-core excluded)", src.len());
+    let (sim, rms) = sim_fit(&src, &dst)?;
+    println!(
+        "    alignment fit on {} 1:1 bone pairs -> scale {:.5} ({:.1}x), residual RMS {:.4} m",
+        src.len(),
+        sim.s,
+        1.0 / sim.s.max(1e-9),
+        rms
+    );
+    if rms > 0.12 {
+        println!("    ⚠ residual RMS {rms:.4} m is high — the two rigs may differ in proportion; inspect in the viewer");
+    }
+
+    let mut sem = SemMesh { pos: vec![], nrm: vec![], uv: vec![], joints: vec![], weights: vec![], indices: vec![], prims: vec![], draws: vec![] };
+    let mut vert_mesh: Vec<usize> = Vec::new();
+    let mut bad_w = 0usize;
+    for pr in &g.prims {
+        let vbase = sem.pos.len() as u32;
+        for v in 0..pr.positions.len() {
+            sem.pos.push(sim.point(pr.positions[v]));
+            let n = sim.rot(pr.normals[v]);
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            sem.nrm.push(if l > 1e-6 { [n[0] / l, n[1] / l, n[2] / l] } else { [0.0, 1.0, 0.0] });
+            sem.uv.push(pr.uvs[v]);
+            let jl = pr.joints[v];
+            let mut jg = [0u16; 4];
+            for k in 0..4 {
+                jg[k] = rm.to_sean[jl[k] as usize].unwrap_or(0) as u16;
+            }
+            sem.joints.push(jg);
+            let w = pr.weights[v];
+            let sw: f32 = w.iter().sum();
+            if sw > 0.0 && (sw - 1.0).abs() > 0.05 {
+                bad_w += 1;
+            }
+            sem.weights.push(w);
+            vert_mesh.push(pr.mesh_index);
+        }
+        let istart = sem.indices.len() as u32;
+        for &i in &pr.indices {
+            sem.indices.push(vbase + i);
+        }
+        let pi = sem.prims.len() as u32;
+        sem.prims.push((istart, pr.indices.len() as u32));
+        let mat = crate::pack::pandemic_hash(&fiddy_mat_name(pr.material.max(0) as usize));
+        sem.draws.push((pi, mat, 0));
+    }
+    if bad_w > 0 {
+        println!("    note: {bad_w} vertices have a non-unit weight sum (engine renormalizes)");
+    }
+    Ok((sem, vert_mesh, sim, rms))
+}
+
+// ---------------------------------------------------------------------------
+// Stage B: split onto Sean's part slots.
+//
+// This is the fix for the bug that broke the Mattias port (memory
+// `mattias-parts-all-in-HD-stub-bug`): that port baked the WHOLE body into `_HD` and left
+// `_LB/_UB/_GR/_HAT` as 3-vertex stubs. Gameplay renders the merged blob so it looked fine, but the
+// combined-LOD/cutscene path renders PER PART and found nothing -> invisible in cutscenes.
+//
+// Vanilla Sean partitions as HD(head) / UB(torso+arms) / LB(hips+legs) / GR(gear) / HAT. 50 Cent's
+// source splits Head+DeepEye -> HD naturally; its single Body mesh is split UB/LB along the
+// skeleton itself: UB = the subtree of `Bone_Spine1`, LB = everything else (hips, thighs, shins,
+// feet). Hierarchy-driven, so it needs no hardcoded bone list and follows Sean's own rig.
+// ---------------------------------------------------------------------------
+
+const P_HD: u8 = 0;
+const P_UB: u8 = 1;
+const P_LB: u8 = 2;
+
+fn part_name(p: u8) -> &'static str {
+    match p {
+        P_HD => "HD",
+        P_UB => "UB",
+        _ => "LB",
+    }
+}
+
+/// Per Sean bone: is it in the upper body (the `Bone_Spine1` subtree)?
+/// Relies on the skeleton being topologically ordered (parent index < child index) — verified true
+/// for Sean's 191 bones, and already assumed by `bone_world_positions`.
+fn upper_body_mask(skel: &str) -> Result<Vec<bool>, String> {
+    let sean = crate::gltf::load_sean_skel(skel)?;
+    let parents = crate::gltf::load_sean_parents(skel)?;
+    let spine = sean.iter().position(|(_, n)| n == "Bone_Spine1").ok_or("skeleton has no Bone_Spine1")?;
+    let mut upper = vec![false; sean.len()];
+    upper[spine] = true;
+    for i in 0..sean.len() {
+        let p = parents.get(i).copied().unwrap_or(-1);
+        if p >= 0 && (p as usize) < i && upper[p as usize] {
+            upper[i] = true;
+        }
+    }
+    Ok(upper)
+}
+
+/// Rebuild a SemMesh from only the triangles assigned to `want`, remapping vertices and preserving
+/// each source primitive's material as its own drawcall.
+fn extract_part(sem: &SemMesh, tri_part: &[u8], want: u8) -> SemMesh {
+    let mut out = SemMesh { pos: vec![], nrm: vec![], uv: vec![], joints: vec![], weights: vec![], indices: vec![], prims: vec![], draws: vec![] };
+    let mut vmap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut tri_cursor = 0usize;
+    for (pi, &(istart, count)) in sem.prims.iter().enumerate() {
+        let ntri = (count / 3) as usize;
+        let new_istart = out.indices.len() as u32;
+        for t in 0..ntri {
+            if tri_part[tri_cursor + t] != want {
+                continue;
+            }
+            for k in 0..3 {
+                let ov = sem.indices[istart as usize + t * 3 + k];
+                let nv = match vmap.get(&ov) {
+                    Some(&x) => x,
+                    None => {
+                        let x = out.pos.len() as u32;
+                        let o = ov as usize;
+                        out.pos.push(sem.pos[o]);
+                        out.nrm.push(sem.nrm[o]);
+                        out.uv.push(sem.uv[o]);
+                        out.joints.push(sem.joints[o]);
+                        out.weights.push(sem.weights[o]);
+                        vmap.insert(ov, x);
+                        x
+                    }
+                };
+                out.indices.push(nv);
+            }
+        }
+        let added = out.indices.len() as u32 - new_istart;
+        if added > 0 {
+            let npi = out.prims.len() as u32;
+            out.prims.push((new_istart, added));
+            let (mat, pb) = sem.draws.iter().find(|d| d.0 == pi as u32).map(|d| (d.1, d.2)).unwrap_or((0, 0));
+            out.draws.push((npi, mat, pb));
+        }
+        tri_cursor += ntri;
+    }
+    out
+}
+
+/// Split the retargeted 50 Cent mesh onto Sean's HD/UB/LB slots.
+fn split_50cent(sem: &SemMesh, vert_mesh: &[usize], skel: &str) -> Result<Vec<(u8, SemMesh)>, String> {
+    let upper = upper_body_mask(skel)?;
+    // per-vertex part
+    let vpart: Vec<u8> = (0..sem.pos.len())
+        .map(|i| {
+            if vert_mesh[i] != 0 {
+                return P_HD; // source meshes 1 (Head) and 2 (DeepEye)
+            }
+            let dk = (0..4).max_by(|&a, &b| sem.weights[i][a].total_cmp(&sem.weights[i][b])).unwrap();
+            let b = sem.joints[i][dk] as usize;
+            if upper.get(b).copied().unwrap_or(false) {
+                P_UB
+            } else {
+                P_LB
+            }
+        })
+        .collect();
+    // per-triangle part: majority of its 3 vertices (a 3-vertex vote always has a winner here,
+    // since HD is decided by source mesh and body triangles can only split UB/LB)
+    let ntri: usize = sem.prims.iter().map(|&(_, c)| (c / 3) as usize).sum();
+    let mut tri_part = Vec::with_capacity(ntri);
+    for &(istart, count) in &sem.prims {
+        for t in 0..(count / 3) as usize {
+            let mut votes = [0u8; 3];
+            for k in 0..3 {
+                votes[vpart[sem.indices[istart as usize + t * 3 + k] as usize] as usize] += 1;
+            }
+            let win = (0..3).max_by_key(|&i| votes[i]).unwrap() as u8;
+            tri_part.push(win);
+        }
+    }
+    Ok([P_HD, P_UB, P_LB].iter().map(|&p| (p, extract_part(sem, &tri_part, p))).collect())
+}
+
+pub fn parts_50cent(f: &Flags) -> Result<(), String> {
+    let outdir = std::path::PathBuf::from(if f.out == "patchdynamic0.megapack" { "50cent_port".into() } else { f.out.clone() });
+    std::fs::create_dir_all(&outdir).map_err(|e| format!("mkdir {}: {e}", outdir.display()))?;
+
+    println!("[1] building retargeted 50 Cent mesh");
+    let (sem, vert_mesh, _sim, _rms) = build_50cent(&f.gltf, &f.skel)?;
+    println!("    whole character: {} verts, {} tris", sem.pos.len(), sem.indices.len() / 3);
+
+    println!("[2] splitting onto Sean's part slots (UB = Bone_Spine1 subtree, LB = hips+legs)");
+    let parts = split_50cent(&sem, &vert_mesh, &f.skel)?;
+
+    let mut stub = 0usize;
+    for (p, m) in &parts {
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in &m.pos {
+            for k in 0..3 {
+                lo[k] = lo[k].min(v[k]);
+                hi[k] = hi[k].max(v[k]);
+            }
+        }
+        let ext = if m.pos.is_empty() { [0.0; 3] } else { [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]] };
+        println!(
+            "    _{:<3} {:6} verts  {:6} tris  {} draws   extent ({:.2},{:.2},{:.2})  Y[{:.2},{:.2}]",
+            part_name(*p),
+            m.pos.len(),
+            m.indices.len() / 3,
+            m.draws.len(),
+            ext[0],
+            ext[1],
+            ext[2],
+            if m.pos.is_empty() { 0.0 } else { lo[1] },
+            if m.pos.is_empty() { 0.0 } else { hi[1] }
+        );
+        // The exact Mattias failure signature: a slot that should carry geometry collapsed to a stub.
+        if m.pos.len() < 100 || ext.iter().all(|&e| e < 1e-3) {
+            println!("      ⚠ STUB — this is the Mattias `_HD`-blob failure mode; the cutscene/combined-LOD path would render nothing here");
+            stub += 1;
+        }
+    }
+    let total: usize = parts.iter().map(|(_, m)| m.indices.len() / 3).sum();
+    if total != sem.indices.len() / 3 {
+        return Err(format!("triangle loss in split: {} in, {} out", sem.indices.len() / 3, total));
+    }
+    println!("    triangle conservation OK: {total} in == {total} out (no geometry lost or duplicated)");
+    if stub > 0 {
+        return Err(format!("{stub} part(s) collapsed to a stub — refusing to proceed to encode"));
+    }
+
+    println!("[3] writing per-part SMSH -> {}", outdir.display());
+    for (p, m) in &parts {
+        let path = outdir.join(format!("pmc_hum_50cent_{}.smsh", part_name(*p)));
+        write_smsh(path.to_str().unwrap(), m)?;
+        println!("    {}", path.display());
+    }
+    println!("\nPASS — parts are real geometry, not stubs. `_GR`/`_HAT` are intentionally absent (50 Cent");
+    println!("has no gear/hat); deploy fills those slots with the existing degenerate-empty filler.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage C: encode each part to MESH/MSHA.
+//
+// Uses the same `encode_mesh` proven byte-exact across all 6529 skinned models, so the Mattias
+// authoring invariants come along for free: DynFile.usz==unc1, pad0 16-alignment, real AABB/sphere
+// bounds, stream size fields, pos.w=1.0 (opacity), tangent-bearing vertex format 0x1b003106, and
+// prim@92==numIndices/3. Sean's REAL stored inverse-bind matrices are gathered from the game (a
+// computed inv(bind) is wrong for ~6 bones and collapses verts to the origin).
+//
+// Each part is templated from its OWN matching Sean donor part rather than all from HD, so header
+// and descriptor templates match the slot the part will occupy. The MSHA identity (name@20 /
+// body@148) is finalised per slot by deploy's `reidentify`.
+// ---------------------------------------------------------------------------
+pub fn encode_50cent(f: &Flags) -> Result<(), String> {
+    if f.game.is_empty() {
+        return Err("--game <SaboteurDir> is required (donor MESH, Sean's rig and the stored IBMs all come from Dynamic0)".into());
+    }
+    let outdir = std::path::PathBuf::from(if f.out == "patchdynamic0.megapack" { "50cent_port".into() } else { f.out.clone() });
+    std::fs::create_dir_all(&outdir).map_err(|e| format!("mkdir {}: {e}", outdir.display()))?;
+
+    println!("[1] building + splitting 50 Cent");
+    let (sem, vert_mesh, _sim, _rms) = build_50cent(&f.gltf, &f.skel)?;
+    let parts = split_50cent(&sem, &vert_mesh, &f.skel)?;
+
+    println!("[2] engine assets: Sean's real embedded rig + stored inverse-bind matrices");
+    let mp = pack::Megapack::open(&format!("{}/Global/Dynamic0.megapack", f.game))?;
+    let all = scan_msha(mp.raw());
+    let (sk, nb) = sean_skeleton_section(&f.game, "SeanDevlin_01_GR")?;
+    let stored_ibms = gather_stored_ibms(&f.game)?;
+    println!("    {nb}-bone rig, {} stored IBMs", stored_ibms.len());
+
+    println!("[3] encoding each part (donor = the matching Sean part) + decode-back verify");
+    let mut first_mat = 0u32;
+    for (p, m) in &parts {
+        let pn = part_name(*p);
+        let donor_name = format!("SeanDevlin_01_{pn}");
+        let dm = all
+            .iter()
+            .find(|x| x.name.to_ascii_lowercase().contains(&donor_name.to_ascii_lowercase()))
+            .ok_or_else(|| format!("no donor MSHA matching '{donor_name}' in Dynamic0"))?;
+        let (dbody, _) = read_body_and_dat(mp.raw(), dm)?;
+        let donor = parse_body(&dbody)?;
+        let (body, dat) = encode_mesh(&donor, &sk, nb, m, &stored_ibms)?;
+
+        // Decode-back gate: re-read what we just wrote through the same path the engine uses.
+        let doc = parse_body(&body)?;
+        let back = decode_geometry(&doc, &dat)?;
+        if back.pos.len() != m.pos.len() {
+            return Err(format!("_{pn}: decode-back vert mismatch {} != {}", back.pos.len(), m.pos.len()));
+        }
+        if back.indices.len() != m.indices.len() {
+            return Err(format!("_{pn}: decode-back index mismatch {} != {}", back.indices.len(), m.indices.len()));
+        }
+        let mut maxdev = 0f32;
+        for i in 0..m.pos.len() {
+            for k in 0..3 {
+                maxdev = maxdev.max((back.pos[i][k] - m.pos[i][k]).abs());
+            }
+        }
+        // positions are half-floats; ~1e-3 m at body scale is the quantisation floor, not an error
+        if maxdev > 0.02 {
+            return Err(format!("_{pn}: decode-back position deviation {maxdev:.4} m exceeds half-float tolerance"));
+        }
+        first_mat = m.draws.first().map(|d| d.1).unwrap_or(first_mat);
+
+        let name = format!("CH_AL_SeanDevlin_01_{pn}");
+        let path = outdir.join(format!("pmc_hum_50cent_{pn}.msha"));
+        write_msha(path.to_str().unwrap(), &name, &body, &dat)?;
+        println!(
+            "    _{pn:<3} {:5} v / {:5} tri  ->  body {:7} B, dat {:7} B   decode-back OK (max dev {:.4} m)",
+            m.pos.len(),
+            m.indices.len() / 3,
+            body.len(),
+            dat.len(),
+            maxdev
+        );
+    }
+
+    // Degenerate filler for slots 50 Cent genuinely has no geometry for (_GR gear, _HAT). Unlike the
+    // Mattias stubs — which sat in slots that SHOULD have carried the body — these are semantically
+    // empty, and every slot that must render does carry real geometry.
+    println!("[4] degenerate empty filler for the slots 50 Cent has no geometry for (_GR/_HAT)");
+    let donor = {
+        let dm = all.iter().find(|x| x.name.contains("SeanDevlin_01_HD")).ok_or("no HD donor")?;
+        let (dbody, _) = read_body_and_dat(mp.raw(), dm)?;
+        parse_body(&dbody)?
+    };
+    let empty_sem = SemMesh {
+        pos: vec![[0.0; 3]; 3],
+        nrm: vec![[0.0, 1.0, 0.0]; 3],
+        uv: vec![[0.0; 2]; 3],
+        joints: vec![[0u16; 4]; 3],
+        weights: vec![[1.0, 0.0, 0.0, 0.0]; 3],
+        indices: vec![0, 1, 2],
+        prims: vec![(0, 3)],
+        draws: vec![(0, first_mat, 0)],
+    };
+    let (eb, ed) = encode_mesh(&donor, &sk, nb, &empty_sem, &stored_ibms)?;
+    write_msha(outdir.join("pmc_empty.msha").to_str().unwrap(), "pmc_empty", &eb, &ed)?;
+    println!("    pmc_empty.msha");
+
+    println!("\nPASS — 3 part MSHAs + empty filler in {}/", outdir.display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage D: embedded GLB images -> DTEX, and the WSAO (France.materials) binding.
+//
+// Binding chain the engine walks: drawcall.material -> WSMA record -> WSTX[textureBegin..+n] ->
+// DTEX by pandemic_hash. Each material gets a 3-texture [d,s,n] slice to match the opaque body
+// shader cloned by `wsao::edit`; a material with no specular map (the eye) gets a synthesized
+// neutral one so the slice ORDER stays [d,s,n] and the normal never lands in the spec sampler.
+// ---------------------------------------------------------------------------
+fn fiddy_tex_name(mat: usize, role: &str) -> String {
+    format!("50cent_m{mat}_{role}")
+}
+
+pub fn textures_50cent(f: &Flags) -> Result<(), String> {
+    if f.game.is_empty() {
+        return Err("--game <SaboteurDir> is required (the base France.materials lives there)".into());
+    }
+    let outdir = std::path::PathBuf::from(if f.out == "patchdynamic0.megapack" { "50cent_port".into() } else { f.out.clone() });
+    std::fs::create_dir_all(outdir.join("dtex")).map_err(|e| format!("mkdir dtex: {e}"))?;
+    std::fs::create_dir_all(outdir.join("textures")).map_err(|e| format!("mkdir textures: {e}"))?;
+
+    println!("[1] extracting embedded GLB images");
+    let images = crate::gltf::glb_images(&f.gltf)?;
+    for (i, b) in images.iter().enumerate() {
+        std::fs::write(outdir.join("textures").join(format!("img{i}.png")), b).map_err(|e| format!("write img{i}: {e}"))?;
+    }
+    println!("    {} PNG(s) -> {}/textures", images.len(), outdir.display());
+    let roles = crate::gltf::glb_material_textures(&f.gltf)?;
+
+    println!("[2] encoding DTEX ([d,s,n] per material) ");
+    let mut wsao_mats: Vec<(u32, Vec<u32>)> = Vec::new();
+    let mut ntex = 0usize;
+    for (i, r) in roles.iter().enumerate() {
+        let mat_hash = crate::pack::pandemic_hash(&fiddy_mat_name(i));
+        let mut slice: Vec<u32> = Vec::new();
+        for (k, role) in [(0usize, "d"), (1usize, "s"), (2usize, "n")] {
+            let name = fiddy_tex_name(i, role);
+            let tex_hash = crate::pack::pandemic_hash(&name);
+            let (rgba, w, h) = match r[k] {
+                Some(img) => {
+                    let p = outdir.join("textures").join(format!("img{img}.png"));
+                    crate::tex::decode_png(p.to_str().unwrap())?
+                }
+                None => {
+                    // Only the eye lacks a spec map. A flat dark-grey keeps the [d,s,n] slice intact.
+                    println!("    material {i}: no '{role}' map — synthesizing a neutral 4x4 placeholder to preserve slice order");
+                    (vec![32u8, 32, 32, 255].repeat(16), 4, 4)
+                }
+            };
+            // Diffuse and normal MUST be DXT1: the cloth shader reads diffuse-alpha as OPACITY, so a
+            // DXT5 diffuse renders the character transparent (Mattias bug). Only spec keeps alpha.
+            let bc3 = role == "s" && crate::tex::has_alpha(&rgba);
+            let (rec, _unc) = crate::tex::build_dtex(&name, &rgba, w, h, bc3);
+            std::fs::write(outdir.join("dtex").join(format!("{tex_hash:08X}.dtex")), [b"DTEX", &rec[..]].concat())
+                .map_err(|e| format!("write dtex: {e}"))?;
+            println!("      m{i}.{role}  {w}x{h}  {}  -> {tex_hash:08X}.dtex", if bc3 { "BC3" } else { "BC1" });
+            slice.push(tex_hash);
+            ntex += 1;
+        }
+        wsao_mats.push((mat_hash, slice));
+    }
+    println!("    {} materials, {ntex} DTEX", wsao_mats.len());
+
+    println!("[3] patching WSAO (France.materials)");
+    // Prefer the CLEAN backup: the live file is very likely already patched by a previous port, and
+    // re-patching an accumulated base stacks duplicate records. `wsao::edit` fails loud if the opaque
+    // body template is missing, so a wrong base is caught rather than silently producing bad materials.
+    let bak = format!("{}/France.materials.bak", f.game);
+    let live = format!("{}/France.materials", f.game);
+    let base = if std::path::Path::new(&bak).exists() {
+        println!("    base = France.materials.bak (clean original)");
+        bak
+    } else {
+        println!("    base = France.materials (no .bak found)");
+        live
+    };
+    let out_wsao = outdir.join("France.materials");
+    crate::wsao::edit(&base, out_wsao.to_str().unwrap(), &wsao_mats)?;
+
+    let w = crate::wsao::Wsao::open(out_wsao.to_str().unwrap())?;
+    let mut bad = 0;
+    for (m, want) in &wsao_mats {
+        if w.textures(*m).as_ref() != Some(want) {
+            bad += 1;
+        }
+    }
+    if bad > 0 {
+        return Err(format!("{bad} 50 Cent material(s) did not resolve through the patched WSAO"));
+    }
+    // Sean's head material must still resolve — proves we appended rather than corrupted.
+    if w.textures(0x31AD5DD2).map(|t| t == [0xD0C7AFBC, 0xB2F6DEB7, 0xA8AF6BDE, 0xFB27FAB8]) != Some(true) {
+        return Err("patched WSAO broke Sean's head material — base was not clean".into());
+    }
+    println!("    OK — all {} materials resolve to their DTEX, and Sean's head material is intact", wsao_mats.len());
+    println!("\nPASS — DTEX + France.materials in {}/", outdir.display());
+    Ok(())
+}
+
+pub fn retarget_50cent(f: &Flags) -> Result<(), String> {
+    let out = if f.out == "patchdynamic0.megapack" { "pmc_hum_50cent.smsh".to_string() } else { f.out.clone() };
+
+    println!("[1] loading 50 Cent GLB: {}", f.gltf);
+    let g = crate::gltf::load_glb(&f.gltf)?;
+    let nv: usize = g.prims.iter().map(|p| p.positions.len()).sum();
+    let nt: usize = g.prims.iter().map(|p| p.indices.len() / 3).sum();
+    println!("    {} prims, {} verts, {} tris, {} joints, {} materials", g.prims.len(), nv, nt, g.joint_names.len(), g.material_names.len());
+    for p in &g.prims {
+        println!("      mesh {} '{}': {} v, {} tri, material {}", p.mesh_index, p.mesh_name, p.positions.len(), p.indices.len() / 3, p.material);
+    }
+
+    println!("[2] name-map retarget onto Sean's rig: {}", f.skel);
+    let sean = crate::gltf::load_sean_skel(&f.skel)?;
+    let parents = crate::gltf::load_sean_parents(&f.skel)?;
+    let rm = crate::gltf::build_remap_named(&g, &sean, &parents);
+    println!("    Sean skeleton: {} bones", sean.len());
+    println!("    remap: {} direct, {} folded-to-ancestor, {} orphan (of {} joints)", rm.n_direct, rm.n_folded, rm.n_orphan, g.joint_names.len());
+    if rm.n_orphan > 0 {
+        return Err(format!("{} orphan joints — retarget would drop weights", rm.n_orphan));
+    }
+    // Report the folded bones that actually carry skin weight — the real, chosen fidelity loss.
+    let mut wj = vec![0f32; g.joint_names.len()];
+    for pr in &g.prims {
+        for (jr, wr) in pr.joints.iter().zip(&pr.weights) {
+            for k in 0..4 {
+                wj[jr[k] as usize] += wr[k];
+            }
+        }
+    }
+    let mut fw: Vec<(&String, &String, f32)> = rm
+        .folded
+        .iter()
+        .filter_map(|(a, b)| g.joint_names.iter().position(|n| n == a).map(|ji| (a, b, wj[ji])))
+        .filter(|(_, _, w)| *w > 0.5)
+        .collect();
+    fw.sort_by(|a, b| b.2.total_cmp(&a.2));
+    println!("    {} folded bones carry skin weight (they ride their parent under animation):", fw.len());
+    for (a, b, w) in fw.iter().take(12) {
+        println!("      {a:28} w={w:8.1} -> {b}");
+    }
+    if fw.len() > 12 {
+        println!("      … and {} more", fw.len() - 12);
+    }
+
+    println!("[3] solving bind-pose alignment (scale/axis) + building mesh");
+    let (sem, vert_mesh, _sim, _rms) = build_50cent(&f.gltf, &f.skel)?;
+    let mut bb_min = [f32::MAX; 3];
+    let mut bb_max = [f32::MIN; 3];
+    for p in &sem.pos {
+        for k in 0..3 {
+            bb_min[k] = bb_min[k].min(p[k]);
+            bb_max[k] = bb_max[k].max(p[k]);
+        }
+    }
+    println!(
+        "    aligned bbox  X[{:.3},{:.3}]  Y[{:.3},{:.3}]  Z[{:.3},{:.3}]   height {:.3} m",
+        bb_min[0], bb_max[0], bb_min[1], bb_max[1], bb_min[2], bb_max[2], bb_max[1] - bb_min[1]
+    );
+    {
+        let sb = parse_skel(&f.skel)?;
+        let sp = bone_world_positions(&sb);
+        let (lo, hi) = sp.iter().fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p[1]), h.max(p[1])));
+        let (mh, sh) = (bb_max[1] - bb_min[1], hi - lo);
+        println!("    vs Sean's bind height {sh:.3} m  ->  {:.1}% of Sean", 100.0 * mh / sh);
+        if !(0.85..=1.15).contains(&(mh / sh)) {
+            println!("    ⚠ height is off by >15% — the alignment fit is suspect, do NOT proceed to encode");
+        }
+    }
+    let _ = vert_mesh;
+
+    println!("[4] spatial coherence: distance from each vertex to its dominant bone's rest position");
+    let bones = parse_skel(&f.skel)?;
+    let bpos = bone_world_positions(&bones);
+    let mut dists: Vec<f32> = Vec::with_capacity(sem.pos.len());
+    for i in 0..sem.pos.len() {
+        let dk = (0..4).max_by(|&a, &b| sem.weights[i][a].total_cmp(&sem.weights[i][b])).unwrap();
+        let bp = bpos.get(sem.joints[i][dk] as usize).copied().unwrap_or([0.0; 3]);
+        let p = sem.pos[i];
+        dists.push(((p[0] - bp[0]).powi(2) + (p[1] - bp[1]).powi(2) + (p[2] - bp[2]).powi(2)).sqrt());
+    }
+    dists.sort_by(|a, b| a.total_cmp(b));
+    let n = dists.len();
+    let pct = |q: f32| dists[((n as f32 * q) as usize).min(n - 1)];
+    let near = dists.iter().filter(|&&d| d < 0.40).count();
+    println!(
+        "    median {:.3} m   p95 {:.3} m   max {:.3} m   |  within 0.40 m of bone: {:.1}%",
+        pct(0.5),
+        pct(0.95),
+        dists[n - 1],
+        100.0 * near as f32 / n as f32
+    );
+
+    println!("[5] writing SMSH for the workshop viewer -> {out}");
+    write_smsh(&out, &sem)?;
+    println!("\nDone. Visual gate — load it in the workshop against Sean's rig + animations:");
+    println!("  cargo run -p sab_workshop --release -- \\");
+    println!("    --mesh \"{out}\" --skel <CH_AL_SeanDevlin.skel> --index <anim_bone_map.json> --pack <Animations.pack>");
+    Ok(())
+}
+
 pub fn audit(game: &str) -> Result<(), String> {
     println!("AUDIT: byte-exact MESH re-serialize across every skinned model in Dynamic0");
     let mp = pack::Megapack::open(&format!("{game}/Global/Dynamic0.megapack"))?;

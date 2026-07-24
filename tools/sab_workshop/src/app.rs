@@ -77,27 +77,27 @@ struct Playback {
 pub fn run(cfg: Config) {
     let mut errors: Vec<String> = Vec::new();
 
-    // --- essential assets: mesh + skeleton (no viewer without them) ---
-    let mut mesh: Smsh = match std::fs::read(&cfg.mesh).map_err(|e| e.to_string()).and_then(|b| formats::read_smsh(&b)) {
-        Ok(m) => m,
+    // --- the startup model: assembled from the install, or loaded from --mesh/--skel ---
+    let boot = match crate::boot::load(&cfg) {
+        Ok(b) => b,
         Err(e) => {
-            eprintln!("[sab_workshop] FATAL: cannot load mesh {}: {e}", cfg.mesh);
+            eprintln!("[sab_workshop] FATAL: {e}");
+            if cfg.game_dir.is_empty() {
+                eprintln!(
+                    "[sab_workshop] No game install was found. Pass --game <dir> (the folder holding \
+                     Global/, Animations.pack, France.materials)."
+                );
+            } else {
+                eprintln!("[sab_workshop] Install checked: {}", cfg.game_dir);
+            }
             return;
         }
     };
-    let mut skel: Vec<Bone> = match std::fs::read_to_string(&cfg.skel) {
-        Ok(t) => formats::read_skel(&t),
-        Err(e) => {
-            eprintln!("[sab_workshop] FATAL: cannot load skeleton {}: {e}", cfg.skel);
-            return;
-        }
-    };
-    if skel.is_empty() {
-        eprintln!("[sab_workshop] FATAL: skeleton {} parsed to 0 bones", cfg.skel);
-        return;
-    }
-    // Place rigid accessories (hat/props) now that both mesh and rig are in hand.
-    formats::bind_rigid_attachments(&mut mesh, &skinning::bind_world(&skel));
+    let boot_parts = boot.parts;
+    let boot_ranges = boot.part_ranges;
+    let from_pack = !boot_parts.is_empty();
+    let mesh: Smsh = boot.mesh;
+    let mut skel: Vec<Bone> = boot.bones;
     println!(
         "[sab_workshop] mesh: {} verts, {} tris | skeleton: {} bones",
         mesh.positions.len(),
@@ -145,10 +145,13 @@ pub fn run(cfg: Config) {
     // The clip catalog's track→bone indices are authored against the startup rig; a model with a
     // different bone count cannot use them.
     let rig_bones = skel.len();
-    let mut model_name = std::path::Path::new(&cfg.mesh)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "model".into());
+    let mut model_name = boot.name;
+    // Where this model's material assignments persist. A `--mesh` file keeps its sidecar beside
+    // itself (that is the port workflow's record); a pack model has no file to sit next to, so it
+    // goes in the user's config dir keyed by model name — which also stops every clicked model from
+    // overwriting one shared sidecar, as it used to.
+    let mut tex_profile =
+        cfg.mesh.clone().unwrap_or_else(|| resolve::profile_path(&model_name));
 
     // --- background asset load ---
     // The megapacks (~1.1 GB) + Animations.pack + texture resolve are slow; load them OFF the main
@@ -169,7 +172,10 @@ pub fn run(cfg: Config) {
     {
         let cfgw = cfg.clone();
         let subw = submeshes.clone();
-        std::thread::spawn(move || background_load(cfgw, subw, bg_tx));
+        // A pack-assembled boot model is textured through the engine's own material table on the
+        // click path below, so the worker must not ALSO run the legacy name-token seed over it —
+        // that path exists for `--mesh` files, which have no material bindings to look up.
+        std::thread::spawn(move || background_load(cfgw, subw, rig_bones, !from_pack, bg_tx));
     }
 
 
@@ -213,6 +219,19 @@ pub fn run(cfg: Config) {
     // superseded click are discarded) and the result channel.
     let mut model_req: u64 = 0;
     let (mtex_tx, mtex_rx) = std::sync::mpsc::channel::<ModelTex>();
+    // The boot model gets the SAME engine-faithful texture resolve a click does — it is the same kind
+    // of model, assembled the same way — so kick it off now that the submesh cover exists.
+    if from_pack {
+        model_req += 1;
+        spawn_tex_resolve(
+            &cfg,
+            &boot_parts,
+            &boot_ranges,
+            &submeshes,
+            model_req,
+            mtex_tx.clone(),
+        );
+    }
     let mut sel_submesh: Option<usize> = None;
     let mut sel_bone: Option<usize> = None;
     let mut sel_tex: Option<usize> = None;
@@ -303,7 +322,7 @@ pub fn run(cfg: Config) {
                             BgMsg::AnimPack(p) => pack = p,
                         }
                     }
-                    // Apply a clicked model's textures once the worker resolves them (newest click wins).
+                    // Apply a model's textures once the worker resolves them (newest request wins).
                     while let Ok(mt) = mtex_rx.try_recv() {
                         if mt.req == model_req {
                             assets = mt.assets;
@@ -311,6 +330,25 @@ pub fn run(cfg: Config) {
                             submesh_prov = mt.submesh_prov;
                             for (i, tex) in &mt.decoded {
                                 renderer.set_submesh_texture(*i, tex);
+                            }
+                            // A hand-authored sidecar is a DECISION and outranks what the material
+                            // table answered — otherwise the picker's Save button did nothing the
+                            // moment the model reloaded.
+                            if let Some((st, sp)) =
+                                resolve::load_sidecar(&tex_profile, submeshes.len(), &assets)
+                            {
+                                for i in 0..submeshes.len() {
+                                    if sp[i] == resolve::Prov::Unresolved {
+                                        continue; // the sidecar says nothing about this submesh
+                                    }
+                                    submesh_tex[i] = st[i];
+                                    submesh_prov[i] = sp[i];
+                                    match st[i].map(|ai| assets[ai].decode()) {
+                                        Some(Ok(tex)) => renderer.set_submesh_texture(i, &tex),
+                                        Some(Err(e)) => eprintln!("[sab_workshop] decode: {e}"),
+                                        None => renderer.clear_submesh_texture(i),
+                                    }
+                                }
                             }
                         }
                     }
@@ -410,35 +448,14 @@ pub fn run(cfg: Config) {
                                     submesh_tex = vec![None; submeshes.len()];
                                     submesh_prov = vec![resolve::Prov::Unresolved; submeshes.len()];
                                     model_req = model_req.wrapping_add(1);
-                                    {
-                                        let cfgw = cfg.clone();
-                                        // every part, with the slice of the index buffer it owns
-                                        let pinfo: Vec<(String, usize, u32, u32)> = lm
-                                            .part_ranges
-                                            .iter()
-                                            .map(|(n, i0, ilen)| {
-                                                let off = picked
-                                                    .iter()
-                                                    .find(|e| &e.name == n)
-                                                    .map(|e| e.file_off)
-                                                    .unwrap_or(0);
-                                                (n.clone(), off, *i0, *ilen)
-                                            })
-                                            .collect();
-                                        let starts: Vec<u32> =
-                                            submeshes.iter().map(|s| s.index_start).collect();
-                                        // materials[0] per submesh — the drawcall material hash WSAO
-                                        // keys on; None where a range carries no material.
-                                        let mats: Vec<Option<u32>> =
-                                            submeshes.iter().map(|s| s.materials.first().copied()).collect();
-                                        let req = model_req;
-                                        let tx = mtex_tx.clone();
-                                        std::thread::spawn(move || {
-                                            if let Some(mt) = resolve_model_textures(cfgw, pinfo, starts, mats, req) {
-                                                let _ = tx.send(mt);
-                                            }
-                                        });
-                                    }
+                                    spawn_tex_resolve(
+                                        &cfg,
+                                        &picked,
+                                        &lm.part_ranges,
+                                        &submeshes,
+                                        model_req,
+                                        mtex_tx.clone(),
+                                    );
                                     bone_depth = bone_depths(&skel);
                                     sel_submesh = None;
                                     sel_bone = None;
@@ -450,6 +467,10 @@ pub fn run(cfg: Config) {
                                     current = None;
                                     playback.time = 0.0;
                                     model_name = lm.name.clone();
+                                    // Material picks follow the model, not the app: a clicked model
+                                    // came from the pack, so its sidecar is its own, never the
+                                    // startup mesh's (which is what it used to overwrite).
+                                    tex_profile = resolve::profile_path(&model_name);
                                     load_status = Some((
                                         format!(
                                             "{}: {} tris, {nbones} bones, {} textures",
@@ -494,11 +515,11 @@ pub fn run(cfg: Config) {
                         // the submesh to occupied rather than to "seeded".
                         submesh_prov[i] =
                             if ai.is_some() { resolve::Prov::Bound } else { resolve::Prov::Unresolved };
-                        match resolve::save_sidecar(&cfg.mesh, &submesh_tex, &submesh_prov, &assets) {
+                        match resolve::save_sidecar(&tex_profile, &submesh_tex, &submesh_prov, &assets) {
                             Ok(()) => println!(
                                 "[sab_workshop] submesh {i} -> {} (saved {})",
                                 ai.map(|x| assets[x].name.as_str()).unwrap_or("(none)"),
-                                resolve::sidecar_path(&cfg.mesh)
+                                resolve::sidecar_path(&tex_profile)
                             ),
                             Err(e) => eprintln!("[sab_workshop] sidecar save failed: {e}"),
                         }
@@ -506,11 +527,11 @@ pub fn run(cfg: Config) {
 
                     // --- act on an explicit sidecar write (the stamp) ---
                     if std::mem::take(&mut pending_save) {
-                        match resolve::save_sidecar(&cfg.mesh, &submesh_tex, &submesh_prov, &assets) {
+                        match resolve::save_sidecar(&tex_profile, &submesh_tex, &submesh_prov, &assets) {
                             Ok(()) => {
                                 let n = submesh_prov.iter().filter(|p| **p == resolve::Prov::Bound).count();
                                 load_status = Some((
-                                    format!("wrote {} ({n} bound)", resolve::sidecar_path(&cfg.mesh)),
+                                    format!("wrote {} ({n} bound)", resolve::sidecar_path(&tex_profile)),
                                     false,
                                 ));
                             }
@@ -577,6 +598,40 @@ enum BgMsg {
     Packs { megapack: Option<pack::Megapack>, palettes: Option<pack::Megapack> },
     /// Animations.pack (187 MB) — needed only to PLAY a clip, so it is loaded last.
     AnimPack(Option<PackData>),
+}
+
+/// Resolve a pack model's textures on a WORKER, so neither startup nor a click ever freezes the UI
+/// (the resolve can touch the whole 715 MB pack). `req` tags the request; a stale result from a
+/// superseded one is discarded on the main thread.
+///
+/// Used for the boot model AND for every click — they are the same kind of model, assembled the same
+/// way, so they must be textured by the same rules (the engine's material table).
+fn spawn_tex_resolve(
+    cfg: &Config,
+    parts: &[meshload::MeshEntry],
+    part_ranges: &[(String, u32, u32)],
+    submeshes: &[SubMesh],
+    req: u64,
+    tx: std::sync::mpsc::Sender<ModelTex>,
+) {
+    // Every part, with the slice of the index buffer it owns.
+    let pinfo: Vec<(String, usize, u32, u32)> = part_ranges
+        .iter()
+        .map(|(n, i0, ilen)| {
+            let off = parts.iter().find(|e| &e.name == n).map(|e| e.file_off).unwrap_or(0);
+            (n.clone(), off, *i0, *ilen)
+        })
+        .collect();
+    let starts: Vec<u32> = submeshes.iter().map(|s| s.index_start).collect();
+    // materials[0] per submesh — the drawcall material hash WSAO keys on; None where a range carries
+    // no material.
+    let mats: Vec<Option<u32>> = submeshes.iter().map(|s| s.materials.first().copied()).collect();
+    let cfgw = cfg.clone();
+    std::thread::spawn(move || {
+        if let Some(mt) = resolve_model_textures(cfgw, pinfo, starts, mats, req) {
+            let _ = tx.send(mt);
+        }
+    });
 }
 
 /// Textures resolved (on a worker) for a model the user clicked in the browser. `req` tags the click
@@ -712,18 +767,34 @@ fn resolve_model_textures(
     Some(ModelTex { req, assets, submesh_tex, submesh_prov, decoded })
 }
 
+/// The clip catalog for a rig of `rig_bones` bones: the game's `Animations.pack`, or the generated
+/// `anim_bone_map.json` when `--index` names one.
+fn load_catalog(cfg: &Config, rig_bones: usize) -> Result<AnimCatalog, String> {
+    match &cfg.index {
+        Some(p) => anim_index::load(p),
+        None => anim_index::from_pack(&cfg.pack, rig_bones),
+    }
+}
+
 /// The slow boot work, on a worker thread, streamed in stages via `tx`. Each `send` lets the main
 /// thread paint that section immediately. The megapacks are mmapped (instant open); the model list is
 /// enumerated from the index (only sub-pack header windows are touched), so it appears fast.
-fn background_load(cfg: Config, submeshes: Vec<SubMesh>, tx: std::sync::mpsc::Sender<BgMsg>) {
+fn background_load(
+    cfg: Config,
+    submeshes: Vec<SubMesh>,
+    rig_bones: usize,
+    legacy_textures: bool,
+    tx: std::sync::mpsc::Sender<BgMsg>,
+) {
     let n = submeshes.len();
 
-    // 1. clip catalog — first thing to fill.
-    let catalog = match anim_index::load(&cfg.index) {
+    // 1. clip catalog — first thing to fill. From the pack's own ANIM block unless `--index` names a
+    // generated catalog (see `anim_index`).
+    let catalog = match load_catalog(&cfg, rig_bones) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[sab_workshop] anim index: {e}");
-            AnimCatalog { clips: Vec::new(), skeleton_bones: 0, num_main_clips: 0 }
+            eprintln!("[sab_workshop] anim catalog: {e}");
+            AnimCatalog { clips: Vec::new(), skeleton_bones: rig_bones, num_main_clips: 0 }
         }
     };
     let playable_rows: Vec<usize> =
@@ -758,15 +829,18 @@ fn background_load(cfg: Config, submeshes: Vec<SubMesh>, tx: std::sync::mpsc::Se
         palettes: pack::Megapack::open(&cfg.palettes).ok(),
     });
 
-    // 4. the character's textures (token scan → matched bundle → BC-decode the bound ones) — slow.
+    // 4. the LEGACY texture path for a `--mesh` file: a name-token bundle scan + a per-part suffix
+    // seed. Skipped entirely for a pack-assembled model, which is textured through the engine's own
+    // material table on the main thread's resolve (see `spawn_tex_resolve`).
     let mut assets: Vec<resolve::TexAsset> = Vec::new();
     let mut submesh_tex: Vec<Option<usize>> = vec![None; n];
     let mut submesh_prov: Vec<resolve::Prov> = vec![resolve::Prov::Unresolved; n];
     let mut decoded: Vec<(usize, crate::dtex::CpuTexture)> = Vec::new();
-    if let Some(mp) = &megapack {
+    let mesh_path = cfg.mesh.clone().unwrap_or_default();
+    if let (true, Some(mp)) = (legacy_textures, &megapack) {
         let a = resolve::textures_in(mp, &cfg.char_token);
-        (submesh_tex, submesh_prov) = resolve::load_sidecar(&cfg.mesh, n, &a).unwrap_or_else(|| {
-            let assign = resolve::autoseed(&cfg.mesh, &submeshes, &a);
+        (submesh_tex, submesh_prov) = resolve::load_sidecar(&mesh_path, n, &a).unwrap_or_else(|| {
+            let assign = resolve::autoseed(&mesh_path, &submeshes, &a);
             let prov = resolve::seed_prov(&assign);
             (assign, prov)
         });
@@ -793,7 +867,11 @@ fn background_load(cfg: Config, submeshes: Vec<SubMesh>, tx: std::sync::mpsc::Se
             }
         }
     }
-    let _ = tx.send(BgMsg::Textures { assets, submesh_tex, submesh_prov, decoded });
+    // Only send if one of the two paths above actually produced something — an empty result would
+    // CLEAR the material-table bindings the boot resolve had already applied.
+    if legacy_textures || !decoded.is_empty() {
+        let _ = tx.send(BgMsg::Textures { assets, submesh_tex, submesh_prov, decoded });
+    }
     drop(megapack); // the main thread has its own copy (sent in stage 3)
 
     // 5. Animations.pack (187 MB) — needed only to PLAY a clip, so it is loaded last.
@@ -893,17 +971,16 @@ pub fn texcheck(cfg: Config, filter: &str) -> i32 {
 /// frames, and print sanity stats. Returns a process exit code. Exercises the whole
 /// load -> decode -> skin path without opening a window.
 pub fn selftest(cfg: Config, n: usize) -> i32 {
-    let mesh = match std::fs::read(&cfg.mesh).map_err(|e| e.to_string()).and_then(|b| formats::read_smsh(&b)) {
-        Ok(m) => m,
-        Err(e) => { eprintln!("selftest: mesh: {e}"); return 1; }
+    let boot = match crate::boot::load(&cfg) {
+        Ok(b) => b,
+        Err(e) => { eprintln!("selftest: boot model: {e}"); return 1; }
     };
-    let skel = match std::fs::read_to_string(&cfg.skel) {
-        Ok(t) => formats::read_skel(&t),
-        Err(e) => { eprintln!("selftest: skel: {e}"); return 1; }
-    };
-    let catalog = match anim_index::load(&cfg.index) {
+    println!("selftest: boot model {} ({})", boot.name, if boot.from_pack() { "from the install" } else { "from files" });
+    let mesh = boot.mesh;
+    let skel = boot.bones;
+    let catalog = match load_catalog(&cfg, skel.len()) {
         Ok(c) => c,
-        Err(e) => { eprintln!("selftest: index: {e}"); return 1; }
+        Err(e) => { eprintln!("selftest: catalog: {e}"); return 1; }
     };
     let pack = match PackData::load(&cfg.pack) {
         Ok(p) => Some(p),
@@ -1146,7 +1223,7 @@ pub fn selftest(cfg: Config, n: usize) -> i32 {
     match resolve::load_character_textures(&cfg.megapack, &cfg.char_token) {
         Ok(assets) => {
             let diffuse = assets.iter().filter(|a| a.role == resolve::Role::Diffuse).count();
-            let seed = resolve::autoseed(&cfg.mesh, &cover, &assets);
+            let seed = resolve::autoseed(cfg.mesh.as_deref().unwrap_or_default(), &cover, &assets);
             let applied = seed.iter().filter(|a| a.is_some()).count();
             println!("selftest: resolved {} textures ({diffuse} diffuse); auto-seeded {applied}/{} submeshes", assets.len(), cover.len());
             for (i, a) in seed.iter().enumerate() {
@@ -1169,13 +1246,13 @@ pub fn selftest(cfg: Config, n: usize) -> i32 {
 /// quantization, …). A track's translation should stay near its bone's BIND translation; only a
 /// root-motion bone legitimately travels.
 pub fn anim_sweep(cfg: Config, limit: usize) -> i32 {
-    let skel = match std::fs::read_to_string(&cfg.skel) {
-        Ok(t) => formats::read_skel(&t),
-        Err(e) => { eprintln!("sweep: skel: {e}"); return 1; }
+    let skel = match crate::boot::load(&cfg) {
+        Ok(b) => b.bones,
+        Err(e) => { eprintln!("sweep: rig: {e}"); return 1; }
     };
-    let catalog = match anim_index::load(&cfg.index) {
+    let catalog = match load_catalog(&cfg, skel.len()) {
         Ok(c) => c,
-        Err(e) => { eprintln!("sweep: index: {e}"); return 1; }
+        Err(e) => { eprintln!("sweep: catalog: {e}"); return 1; }
     };
     let pack = match PackData::load(&cfg.pack) {
         Ok(p) => Some(p),

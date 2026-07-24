@@ -11,7 +11,7 @@ license = "MIT"
 # case-fold, ^0x2A finalizer == Saboteur.exe FUN_00dc1e20), and its block codec SGES is
 # byte-identical to Mercs 2 (docs/formats/archive_and_models.md). We reuse those rather than
 # re-derive them. Everything Saboteur-specific (megapack/SBLA/DTEX/MESH/WSAO) is implemented here.
-mercs2_formats = "2.1"
+mercs2_formats = "3.0"
 # zlib streams inside SBLA sub-packs (DTEX mip payloads, MSHA blobs: raw 78 01 zlib).
 flate2 = "1"
 

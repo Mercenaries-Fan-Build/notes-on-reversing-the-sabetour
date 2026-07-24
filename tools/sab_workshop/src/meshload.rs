@@ -96,6 +96,40 @@ fn find_subseq(buf: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     buf[from..].windows(needle.len()).position(|w| w == needle).map(|i| from + i)
 }
 
+/// A `Matrix44` as the MESH stores it: 16 f32, **column-major** — the translation sits in the last
+/// four (`m[12..15]`), the last row is `(0,0,0,1)`, which is glam's own `from_cols_array` layout.
+///
+/// Getting this backwards is undetectable at bind pose. `jointMatrix = world · inv_bind` comes out
+/// identity for ANY self-consistent pair of world and inverse-bind, so a transposed read renders a
+/// flawless bind pose and only falls apart once a clip drives the rig. `matrices_are_column_major`
+/// pins the layout against the real bytes rather than against our belief about them.
+fn mat44(raw: &[f32; 16]) -> Mat4 {
+    Mat4::from_cols_array(raw)
+}
+
+/// The inverse of [`row_major`]: a `Bone`'s stored row-major matrix back to a `Mat4`.
+fn from_row_major(rm: &[f32; 16]) -> Mat4 {
+    let mut cm = [0f32; 16];
+    for c in 0..4 {
+        for r in 0..4 {
+            cm[c * 4 + r] = rm[r * 4 + c];
+        }
+    }
+    Mat4::from_cols_array(&cm)
+}
+
+/// The row-major form `formats::Bone` stores (`skinning` transposes it back).
+fn row_major(m: Mat4) -> [f32; 16] {
+    let cm = m.to_cols_array();
+    let mut rm = [0f32; 16];
+    for c in 0..4 {
+        for r in 0..4 {
+            rm[r * 4 + c] = cm[c * 4 + r];
+        }
+    }
+    rm
+}
+
 fn parse_msha_header(buf: &[u8], off: usize) -> Option<(String, u32, u32, u32, u32)> {
     if off + 276 > buf.len() {
         return None;
@@ -199,6 +233,9 @@ struct DrawCall { primitive_index: u32, material: u32, parent_bone: u16 }
 struct MeshTail {
     bones: Vec<Bone>,
     bone_hashes: Vec<u32>,
+    /// The `localTMS` array, raw and in file order — the asset's OWN local matrix per bone. The
+    /// bind chain is built from these, not from the RTS triple (see `parse_mesh`).
+    local_tms: Vec<[f32; 16]>,
     /// bone name-hash -> the asset's own inverse-bind, for the bones this part skins.
     stored_ibm: std::collections::HashMap<u32, [f32; 16]>,
     bone_ids: Vec<u8>,
@@ -244,9 +281,26 @@ fn parse_mesh(body: &[u8]) -> Result<MeshTail, String> {
     let bone_ids = body[p..p + num_bones].to_vec();
     p += num_bones + num_unk_bones0 as usize;
 
-    // localTMS: numBones * Matrix44 — SKIPPED. We compose bind from the RTS values below, which the
-    // .skel pipeline also does (its bind-pose jointMatrix comes out identity), so reading the
-    // matrices here would only duplicate that.
+    // localTMS: numBones * Matrix44 — the bone's own LOCAL matrix.
+    //
+    // This used to be skipped on the grounds that the RTS triple below says the same thing, and it
+    // does (`the_matrix_and_the_rts_triple_state_the_same_local`, worst deviation ~1e-7). We read it
+    // anyway because it is EXACT: composing a matrix from a TRS triple and decomposing it back is
+    // not lossless, and the rig hands `Bone::local_m` straight to the renderer. It also gives the
+    // column-major layout a second witness — the two encodings only agree if the matrix is read the
+    // right way round.
+    let mut local_tms = Vec::with_capacity(num_bones);
+    for i in 0..num_bones {
+        let o = p + i * 64;
+        if o + 64 > body.len() {
+            return Err("localTMS out of range".into());
+        }
+        let mut m = [0f32; 16];
+        for (k, slot) in m.iter_mut().enumerate() {
+            *slot = f32at(body, o + k * 4);
+        }
+        local_tms.push(m);
+    }
     p += num_bones * 64;
 
     // bones: numBones * Bone(64) — boneName0 (hash) @0
@@ -276,16 +330,8 @@ fn parse_mesh(body: &[u8]) -> Result<MeshTail, String> {
     }
 
     // Compose bind world (column-vector, parent * local), then inv_bind ROW-MAJOR for `Bone`.
-    let locals: Vec<Mat4> = trs
-        .iter()
-        .map(|(t, r, s)| {
-            Mat4::from_scale_rotation_translation(
-                Vec3::from_array(*s),
-                Quat::from_xyzw(r[0], r[1], r[2], r[3]),
-                Vec3::from_array(*t),
-            )
-        })
-        .collect();
+    // The local comes from `localTMS`; the RTS triple is kept only for callers that read `Bone::t`.
+    let locals: Vec<Mat4> = local_tms.iter().map(mat44).collect();
     let mut world = vec![Mat4::IDENTITY; num_bones];
     let mut done = vec![false; num_bones];
     let mut progress = true;
@@ -312,22 +358,20 @@ fn parse_mesh(body: &[u8]) -> Result<MeshTail, String> {
     }
     let bones: Vec<Bone> = (0..num_bones)
         .map(|i| {
-            let cm = world[i].inverse().to_cols_array(); // column-major
-            let mut rm = [0f32; 16];
-            for c in 0..4 {
-                for r in 0..4 {
-                    rm[r * 4 + c] = cm[c * 4 + r];
-                }
-            }
             let (t, r, s) = trs[i];
             Bone {
                 parent: parents[i],
-                name: format!("bone_{:08X}", name_hashes[i]),
+                // A MESH stores only the hash; resolve it through the recovered dictionary so a
+                // pack-loaded rig reads like the `.skel` one (and so anything that filters bones BY
+                // NAME — the inspector tree, `anim_sweep`'s root chain — still works).
+                name: crate::bone_names::name_for(name_hashes[i]),
                 t,
                 r,
                 s,
-                inv_bind: Some(rm),
-                local_m: None,
+                inv_bind: Some(row_major(world[i].inverse())),
+                // Hand on the EXACT local matrix: a TRS round trip is not lossless, and this is the
+                // transform the whole bind chain was composed from.
+                local_m: Some(row_major(locals[i])),
             }
         })
         .collect();
@@ -392,7 +436,7 @@ fn parse_mesh(body: &[u8]) -> Result<MeshTail, String> {
         p += 16;
     }
 
-    Ok(MeshTail { bones, bone_hashes: name_hashes, stored_ibm, bone_ids, remaps, streams, prims, draws })
+    Ok(MeshTail { bones, bone_hashes: name_hashes, local_tms, stored_ibm, bone_ids, remaps, streams, prims, draws })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -632,6 +676,108 @@ mod bbox_tests {
 }
 
 #[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// Open a megapack and hand back the raw MESH body of the first model matching `token`.
+    fn a_real_mesh_body(token: &str) -> Option<Vec<u8>> {
+        let s = crate::settings::detected()?;
+        let pack = crate::pack::Megapack::open(&s.megapack()).ok()?;
+        let list = list_meshes(&pack);
+        let buf = pack.raw();
+        let e = list.iter().find(|e| e.name.to_ascii_lowercase().contains(token))?;
+        let start = e.file_off + 276;
+        zlib_inflate(&buf[start..start + e.comp0 as usize], e.unc0 as usize)
+    }
+
+    /// **Which way round are the MESH's 4×4 matrices stored?** Answered from the bytes, not from
+    /// belief: an affine transform has a last row of `(0,0,0,1)`, and where those four values sit
+    /// tells you the layout. Column-major puts the translation in `raw[12..14]` and the zeros at
+    /// `raw[3]`, `raw[7]`, `raw[11]`; row-major is the transpose of that.
+    ///
+    /// This has to be asserted because getting it wrong is SILENT. `jointMatrix = world · inv_bind`
+    /// is identity for any self-consistent pair, so a transposed read renders a perfect bind pose and
+    /// only tears once a clip plays — which, until the app booted from the pack, nothing here did.
+    #[test]
+    fn matrices_are_column_major() {
+        let Some(body) = a_real_mesh_body("seandevlin") else {
+            eprintln!("skip: no Saboteur install detected");
+            return;
+        };
+        let tail = parse_mesh(&body).expect("parse MESH");
+        assert!(!tail.local_tms.is_empty(), "no localTMS array");
+
+        let mut col_major = 0;
+        let mut row_major_count = 0;
+        let check = |m: &[f32; 16]| -> (bool, bool) {
+            let z = |v: f32| v.abs() < 1e-6;
+            let one = (m[15] - 1.0).abs() < 1e-6;
+            (one && z(m[3]) && z(m[7]) && z(m[11]), one && z(m[12]) && z(m[13]) && z(m[14]))
+        };
+        // Every localTMS and every stored inverse-bind, over one real character part.
+        let all: Vec<&[f32; 16]> = tail.local_tms.iter().chain(tail.stored_ibm.values()).collect();
+        for m in &all {
+            let (c, r) = check(m);
+            // A matrix with no translation at all satisfies both; it says nothing either way.
+            if c && !r {
+                col_major += 1;
+            } else if r && !c {
+                row_major_count += 1;
+            }
+        }
+        eprintln!(
+            "{} matrices: {col_major} decisively column-major, {row_major_count} decisively row-major",
+            all.len()
+        );
+        assert!(col_major > 0, "no matrix carried a translation — inconclusive sample");
+        assert_eq!(
+            row_major_count, 0,
+            "MESH matrices are read as column-major ({col_major} agree), but {row_major_count} say otherwise"
+        );
+    }
+
+    /// A MESH states each bone's local transform TWICE — as a `localTMS` matrix and as the RTS triple
+    /// after it — and the two must say the same thing. We chain the matrix (it is exact, where a TRS
+    /// round trip is not), so this is the check that doing so cannot change the rig.
+    ///
+    /// It is also the control for [`matrices_are_column_major`]: read the matrix the wrong way round
+    /// and it stops agreeing with the triple, which is a second, independent witness to the layout.
+    #[test]
+    fn the_matrix_and_the_rts_triple_state_the_same_local() {
+        let Some(body) = a_real_mesh_body("seandevlin") else {
+            eprintln!("skip: no Saboteur install detected");
+            return;
+        };
+        let tail = parse_mesh(&body).expect("parse MESH");
+        let n = tail.bones.len();
+        let mut worst = 0f32;
+        let mut worst_bone = 0usize;
+        for i in 0..n {
+            let b = &tail.bones[i];
+            let from_trs = Mat4::from_scale_rotation_translation(
+                Vec3::from_array(b.s),
+                Quat::from_xyzw(b.r[0], b.r[1], b.r[2], b.r[3]),
+                Vec3::from_array(b.t),
+            );
+            let d = mat44(&tail.local_tms[i])
+                .to_cols_array()
+                .iter()
+                .zip(from_trs.to_cols_array().iter())
+                .fold(0f32, |a, (x, y)| a.max((x - y).abs()));
+            if d > worst {
+                worst = d;
+                worst_bone = i;
+            }
+        }
+        eprintln!(
+            "{n} bones: worst localTMS vs RTS deviation {worst:.6} (bone {worst_bone} '{}')",
+            tail.bones[worst_bone].name
+        );
+        assert!(worst < 1e-3, "localTMS and the RTS triple disagree by {worst} on bone {worst_bone}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -834,31 +980,15 @@ pub fn assemble(buf: &[u8], parts: &[MeshEntry]) -> Result<LoadedMesh, String> {
     // mesh deforms AT BIND POSE — worse than leaving both consistently wrong. So: rebuild each
     // bone's WORLD from the truth, then re-derive its local TRS and inv_bind from that world, and
     // the hierarchy reproduces the real bind pose.
-    let rm_to_mat = |rm: &[f32; 16]| {
-        let mut cm = [0f32; 16];
-        for c in 0..4 {
-            for r in 0..4 {
-                cm[c * 4 + r] = rm[r * 4 + c];
-            }
-        }
-        glam::Mat4::from_cols_array(&cm)
-    };
-    let mat_to_rm = |m: glam::Mat4| {
-        let cm = m.to_cols_array();
-        let mut rm = [0f32; 16];
-        for c in 0..4 {
-            for r in 0..4 {
-                rm[r * 4 + c] = cm[c * 4 + r];
-            }
-        }
-        rm
-    };
-    let local_of = |b: &Bone| {
-        glam::Mat4::from_scale_rotation_translation(
+    // A bone's own local, exactly as the file gave it (`parse_mesh` put `localTMS` here). Falling
+    // back to the TRS triple would reintroduce the collapse it exists to avoid.
+    let local_of = |b: &Bone| match &b.local_m {
+        Some(rm) => from_row_major(rm),
+        None => glam::Mat4::from_scale_rotation_translation(
             glam::Vec3::from_array(b.s),
             glam::Quat::from_xyzw(b.r[0], b.r[1], b.r[2], b.r[3]),
             glam::Vec3::from_array(b.t),
-        )
+        ),
     };
 
     let n = bones.len();
@@ -868,7 +998,7 @@ pub fn assemble(buf: &[u8], parts: &[MeshEntry]) -> Result<LoadedMesh, String> {
     // A bone with ground truth resolves immediately, whatever its position in the list.
     for i in 0..n {
         if let Some(m) = truth.get(&hashes[i]) {
-            world[i] = rm_to_mat(m).inverse();
+            world[i] = mat44(m).inverse();
             done[i] = true;
             corrected += 1;
         }
@@ -916,8 +1046,8 @@ pub fn assemble(buf: &[u8], parts: &[MeshEntry]) -> Result<LoadedMesh, String> {
         bones[i].t = tr.to_array();
         bones[i].r = [rot.x, rot.y, rot.z, rot.w];
         bones[i].s = sc.to_array();
-        bones[i].local_m = Some(mat_to_rm(local));
-        bones[i].inv_bind = Some(mat_to_rm(world[i].inverse()));
+        bones[i].local_m = Some(row_major(local));
+        bones[i].inv_bind = Some(row_major(world[i].inverse()));
     }
 
     // ---- merge geometry, re-keying every part's joints onto the canonical rig ----
@@ -986,7 +1116,7 @@ pub fn assemble(buf: &[u8], parts: &[MeshEntry]) -> Result<LoadedMesh, String> {
     // prove nothing.
     // mirrors skinning::bind_local, so the check exercises what the renderer will actually do
     let exact_local = |b: &Bone| match &b.local_m {
-        Some(rm) => rm_to_mat(rm),
+        Some(rm) => from_row_major(rm),
         None => local_of(b),
     };
     let mut recomposed = vec![glam::Mat4::IDENTITY; n];
@@ -1012,7 +1142,7 @@ pub fn assemble(buf: &[u8], parts: &[MeshEntry]) -> Result<LoadedMesh, String> {
     let mut worst_bone = 0usize;
     for i in 0..n {
         if let Some(ib) = &bones[i].inv_bind {
-            let m = recomposed[i] * rm_to_mat(ib);
+            let m = recomposed[i] * from_row_major(ib);
             let mut d = 0f32;
             for (a, b) in m.to_cols_array().iter().zip(glam::Mat4::IDENTITY.to_cols_array().iter()) {
                 d = d.max((a - b).abs());

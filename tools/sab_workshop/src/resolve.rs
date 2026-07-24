@@ -375,8 +375,25 @@ pub struct Sidecar {
     pub bound: Vec<bool>,
 }
 
-pub fn sidecar_path(mesh_path: &str) -> String {
-    format!("{mesh_path}.materials.json")
+pub fn sidecar_path(profile: &str) -> String {
+    format!("{profile}.materials.json")
+}
+
+/// The sidecar "profile" for a model that has no file of its own — one assembled out of the megapack.
+///
+/// Such a model cannot keep its assignments beside itself, and it must NOT share the startup mesh's
+/// sidecar (which is what every clicked model used to overwrite, silently, one after another). They
+/// go beside the settings instead, keyed by model name:
+/// `%APPDATA%/sab_workshop/materials/<model>`.
+pub fn profile_path(model_name: &str) -> String {
+    let safe: String = model_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    crate::settings::settings_path()
+        .parent()
+        .map(|d| d.join("materials").join(&safe).to_string_lossy().replace('\\', "/"))
+        .unwrap_or(safe)
 }
 
 /// Read the sidecar and map its texture names onto `assets` indices, per submesh, with each
@@ -407,7 +424,7 @@ pub fn load_sidecar(
 
 /// Write the current assignment — and how each entry was arrived at — to the sidecar.
 pub fn save_sidecar(
-    mesh_path: &str,
+    profile: &str,
     assign: &[Option<usize>],
     prov: &[Prov],
     assets: &[TexAsset],
@@ -417,7 +434,12 @@ pub fn save_sidecar(
         bound: prov.iter().map(|p| *p == Prov::Bound).collect(),
     };
     let text = serde_json::to_string_pretty(&sc).map_err(|e| e.to_string())?;
-    std::fs::write(sidecar_path(mesh_path), text).map_err(|e| e.to_string())
+    let path = sidecar_path(profile);
+    // A profile path lives under the config dir, which may not exist on first save.
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, text).map_err(|e| format!("write {path}: {e}"))
 }
 
 /// The provenance implied by a fresh auto-seed: anything it placed is a guess, the rest is nothing.

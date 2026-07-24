@@ -1,17 +1,21 @@
 //! sab_workshop — a native wgpu + egui viewer for The Saboteur characters.
 //!
-//! Loads a merged skinned mesh (SMSH) + skeleton (.skel), lists every animation clip from
-//! `anim_bone_map.json` in a searchable panel, decodes the selected clip on demand from
-//! `Animations.pack`, and plays it back with GPU skinning under an orbit camera.
+//! Assembles a character out of the game's own packs (mesh + rig + textures), lists every animation
+//! clip from `Animations.pack` in a searchable panel, decodes the selected clip on demand and plays
+//! it back with GPU skinning under an orbit camera. A **game install is the only input** — no
+//! generated files, no repo checkout.
 //!
 //! Run:
 //!   cargo run -p sab_workshop --release
-//!   cargo run -p sab_workshop --release -- --mesh <smsh> --skel <skel> --index <json> --pack <pack>
+//!   cargo run -p sab_workshop --release -- --game "C:/GOG Games/The Saboteur" --boot Mattias
+//!   cargo run -p sab_workshop --release -- --mesh <smsh> --skel <skel>   # inspect loose files
 //!   cargo run -p sab_workshop --release -- --help
 
 mod anim_index;
 mod app;
 mod assets;
+mod bone_names;
+mod boot;
 mod camera;
 mod dtex;
 mod editor;
@@ -34,14 +38,21 @@ pub struct Config {
     /// it is carried here as a first-class field so nothing has to recover it by walking parents up
     /// from a megapack path, which is how it used to work in four separate places.
     pub game_dir: String,
-    pub mesh: String,
-    pub skel: String,
-    pub index: String,
+    /// `--mesh` / `--skel`: inspect a mesh + rig from LOOSE FILES instead of the install. Both or
+    /// neither. `None` (the normal case) means the startup character is assembled out of the
+    /// megapack — see `boot.rs`.
+    pub mesh: Option<String>,
+    pub skel: Option<String>,
+    /// `--index`: a generated `anim_bone_map.json`. `None` means the clip catalog is read from
+    /// `Animations.pack` itself, which is where that file's contents came from.
+    pub index: Option<String>,
     pub pack: String,
     /// Megapack the character's DTEX texture bundles live in (in-app texture resolution).
     pub megapack: String,
     /// Case-insensitive DTEX-name token identifying the character's textures (e.g. "SeanDevlinn").
     pub char_token: String,
+    /// Case-insensitive mesh-name token choosing which character to boot with (`--boot`).
+    pub boot_model: String,
     /// The shared palette archive — props/vehicles keep their skins here rather than beside the mesh.
     pub palettes: String,
     /// WSAO material library (`France.materials`) — the engine's material hash → texture binding.
@@ -53,45 +64,25 @@ pub struct Config {
     pub settings: crate::settings::Settings,
 }
 
-/// Where this repo's generated assets (`skeletons/`, `anim_bone_map.json`) live.
-///
-/// This used to be one author's absolute checkout path, compiled into the binary — correct on
-/// exactly one machine and a dead default in every release build. Resolved instead, in order:
-/// `SAB_WORKSHOP_OUTPUT`, then the nearest `output/` walking up from the working directory and from
-/// the executable, then a bare relative `output`. `--mesh`/`--skel`/`--index` still override.
-fn output_dir() -> String {
-    if let Ok(v) = std::env::var("SAB_WORKSHOP_OUTPUT") {
-        return v.replace('\\', "/");
-    }
-    let starts = [std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))];
-    for start in starts.into_iter().flatten() {
-        let mut dir = start.as_path();
-        loop {
-            let cand = dir.join("output");
-            if cand.join("skeletons").is_dir() {
-                return cand.to_string_lossy().replace('\\', "/");
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => break,
-            }
-        }
-    }
-    "output".into()
-}
-
 impl Config {
     /// Build a config from persisted settings, deriving every game-side path from the one root.
+    ///
+    /// **Everything the app needs comes from the install.** There used to be three more defaults
+    /// here, pointing into this repo's `output/` directory — a merged SMSH, a `.skel` and
+    /// `anim_bone_map.json` — and the app refused to start without them, which meant a released
+    /// build did not run at all: it demanded build artefacts of a checkout the user does not have.
+    /// All three were re-encodings of bytes in `Dynamic0.megapack` / `Animations.pack`, so they are
+    /// read from there now (`boot.rs`, `anim_index::from_pack`) and the flags are pure overrides.
     pub fn from_settings(s: crate::settings::Settings) -> Config {
-        let out = output_dir();
         Config {
             game_dir: s.game_dir.clone(),
-            mesh: format!("{out}/skeletons/sean_full.smsh"),
-            skel: format!("{out}/skeletons/CH_AL_SeanDevlin.skel"),
-            index: format!("{out}/anim_bone_map.json"),
+            mesh: None,
+            skel: None,
+            index: None,
             pack: s.anim_pack(),
             megapack: s.megapack(),
             char_token: "SeanDevlinn".into(),
+            boot_model: "SeanDevlin".into(),
             palettes: s.palettes(),
             wsao: Some(s.wsao()),
             dtex_dir: None,
@@ -123,12 +114,13 @@ fn main() {
         settings.clamp();
     }
     let mut cfg = Config::from_settings(settings);
-    if let Some(v) = get("--mesh") { cfg.mesh = v; }
-    if let Some(v) = get("--skel") { cfg.skel = v; }
-    if let Some(v) = get("--index") { cfg.index = v; }
+    if let Some(v) = get("--mesh") { cfg.mesh = Some(v); }
+    if let Some(v) = get("--skel") { cfg.skel = Some(v); }
+    if let Some(v) = get("--index") { cfg.index = Some(v); }
     if let Some(v) = get("--pack") { cfg.pack = v; }
     if let Some(v) = get("--megapack") { cfg.megapack = v; }
     if let Some(v) = get("--char") { cfg.char_token = v; }
+    if let Some(v) = get("--boot") { cfg.boot_model = v; }
     if let Some(v) = get("--palettes") { cfg.palettes = v; }
     if let Some(v) = get("--wsao") { cfg.wsao = Some(v); }
     if let Some(v) = get("--dtexdir") { cfg.dtex_dir = Some(v); }
@@ -156,16 +148,17 @@ fn print_help() {
     println!(
         "sab_workshop — The Saboteur character/animation viewer (wgpu + egui)\n\n\
          USAGE:\n  sab_workshop [OPTIONS]\n\n\
+         The game install is the ONLY thing this needs. Everything below is an override.\n\n\
          OPTIONS:\n\
          \x20 --game  <dir>    game install root   (default: the saved setting, else auto-detected)\n\
-         \x20 --mesh  <path>   SMSH skinned mesh   (default: <output>/skeletons/sean_full.smsh)\n\
-         \x20 --skel  <path>   .skel skeleton      (default: <output>/skeletons/CH_AL_SeanDevlin.skel)\n\
-         \x20 --index <path>   anim_bone_map.json  (default: <output>/anim_bone_map.json)\n\
+         \x20 --boot  <token>  character to open with, by mesh name (default: SeanDevlin)\n\
+         \x20 --mesh  <path>   inspect a loose SMSH instead of the install (needs --skel)\n\
+         \x20 --skel  <path>   the rig for --mesh (flat .skel text)\n\
+         \x20 --index <path>   a generated anim_bone_map.json (default: read Animations.pack)\n\
          \x20 --pack  <path>   Animations.pack     (default: <game>/Animations.pack)\n\
          \x20 --help           show this help\n\n\
          PATHS:\n\
-         \x20 <game>   from settings.json, or auto-detected (GOG / Galaxy / Steam / Pandemic layouts)\n\
-         \x20 <output> $SAB_WORKSHOP_OUTPUT, else the nearest output/ above the CWD or the exe\n\n\
+         \x20 <game>   from settings.json, or auto-detected (GOG / Galaxy / Steam / Pandemic layouts)\n\n\
          CONTROLS (in the window):\n\
          \x20 LMB drag  orbit    |  MMB drag  pan    |  wheel  zoom\n\
          \x20 left panel: search + click a clip to play; bottom panel: play/pause, loop, speed, scrubber"

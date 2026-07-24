@@ -114,7 +114,7 @@ fn is_part_type(ttype: &str) -> bool {
 
 /// The part label for a mesh name: its trailing token, or the last two if the trailing one is a bare
 /// number (`..._01_UB` → `UB`, `..._GR_2` → `GR_2`).
-fn part_label(name: &str) -> String {
+pub fn part_label(name: &str) -> String {
     let toks: Vec<&str> = name.split('_').collect();
     match toks.as_slice() {
         [.., a, b] if b.bytes().all(|c| c.is_ascii_digit()) => format!("{a}_{b}"),

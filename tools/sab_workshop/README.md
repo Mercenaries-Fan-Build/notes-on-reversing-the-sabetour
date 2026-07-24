@@ -35,40 +35,41 @@ The original character/animation viewer is unchanged and is page 1.
 > **Use `--release`.** A debug build is far too slow for the 715 MB megapack sweep + BC decode
 > (minutes vs ~1.4 s).
 
-From the repo root (or anywhere — the default input paths are absolute):
-
-```
-cargo run -p sab_workshop --release
-```
-
-If you are not in a Cargo workspace that includes this crate, run it from the crate directory:
+**A game install is the only input.** No generated files, no repo checkout — the startup character,
+its rig, its textures and the whole clip list are read out of the packs. The install is found
+automatically (GOG / Galaxy / Steam / Pandemic layouts) or set once on the **Settings** page.
 
 ```
 cd tools/sab_workshop
 cargo run --release
 ```
 
-Override any input path (all default to the generated Sean assets):
-
 ```
-cargo run --release -- \
-  --mesh     c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output/skeletons/sean_full.smsh \
-  --skel     c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output/skeletons/CH_AL_SeanDevlin.skel \
-  --index    c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output/anim_bone_map.json \
-  --pack     "C:/GOG Games/The Saboteur/Animations.pack" \
-  --megapack "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack" \
-  --char     SeanDevlinn
+sab_workshop.exe    # or just run the built binary, from anywhere
 ```
 
-- `--megapack <path>` — the megapack holding the character's DTEX bundles (textures).
-- `--char <token>` — case-insensitive token selecting which bundles are this character's.
+Everything below is an override, not a requirement:
+
+```
+sab_workshop --game "D:/Games/The Saboteur"    # an install in an unusual place
+sab_workshop --boot Mattias                    # open on someone other than Sean
+sab_workshop --mesh <ported>.smsh              # inspect a loose SMSH, rigged from the install
+sab_workshop --mesh <m>.smsh --skel <r>.skel   # ...and with its own rig file
+sab_workshop --index anim_bone_map.json        # a generated clip catalog instead of the pack's
+```
+
+- `--boot <token>` — case-insensitive mesh-name token picking the startup character.
+- `--megapack <path>` / `--pack <path>` — point at a single archive directly.
+- `--char <token>` — which DTEX bundles are this character's (the `--mesh` texture path only).
 
 Other flags:
 
 - `--help` — usage + controls.
-- `--selftest [N]` — **headless** verification (no window): loads the assets, decodes the
+- `--selftest [N]` — **headless** verification (no window): assembles the startup model, decodes the
   N-th playable clip, runs skinning over several frames, resolves textures + prints the
   per-submesh assignment, and prints sanity stats. Useful on a machine with no display / GPU.
+- `--texcheck [name]` — headless: bind every assembled asset's textures and report coverage.
+- `--anim-sweep [N]` — headless: decode N clips and flag any that pose a limb implausibly.
 
 ## Controls
 
@@ -85,21 +86,23 @@ Other flags:
 
 ## What it does
 
-1. **Load** the SMSH skinned mesh (positions / normals / UVs / `JOINTS_0` u16×4 /
-   `WEIGHTS_0` f32×4 / indices / **prims**) and the `.skel` skeleton (bind-pose local TRS +
-   row-major inverse-bind per bone).
+1. **Assemble** the startup character from `Dynamic0.megapack`: pick its parts (one per body slot,
+   no LODs, head variants collapsed), inflate each `MSHA` → MESH, merge the geometry and build ONE
+   union rig keyed by bone name-hash, with the bind pose corrected from the parts' own inverse-bind
+   matrices. Same code path a click in the model browser takes — [`boot.rs`](src/boot.rs).
 2. **Cover** the index buffer with a non-overlapping per-material draw list. `sab_mesh` emits one
    prim per *drawcall*, so ranges overlap (a coarse "whole" primitive plus its split children, and
    several materials/passes on one range). `formats::submesh_cover` keeps only **leaf** ranges and
    collapses duplicates — for Sean that's 34 prims → **14 submeshes** tiling all 114,402 indices.
-3. **Resolve textures** in-process from the megapack: find the bundles carrying the character token,
-   walk their DTEX records (names are plaintext), classify each by suffix (`_D` diffuse, `_N`/`_NM`
-   normal, `_S` spec, `_WM`/`_MASK` mask), and **auto-seed** each submesh's diffuse by body part
-   (HD→head, UB→jacket, LB→pants, GR→hand, HAT→hat). Decoding is lazy — only bound textures are
-   BC-decoded. A saved sidecar overrides the seed (see below).
-4. **List** every clip from `anim_bone_map.json`. By default only clips authored on this rig
-   are shown (`bone_repr == "index"` && `subset_of_skeleton == true`, ~2155 of 2214); tick
-   *show all* to include the rest. The list is searchable by name.
+3. **Resolve textures** the way the engine does: each submesh's drawcall material hash → its WSMA
+   record in `France.materials` → the colour texture's name-hash → the DTEX record carrying it, found
+   in the parts' own bundles first and then across the packs. Where the table has no answer, fall
+   back to the name-suffix seed (HD→head, UB→jacket, LB→pants, GR→hand, HAT→hat). Decoding is lazy —
+   only bound textures are BC-decoded. A saved pick overrides both (see below).
+4. **List** every clip from the `ANIM` block at the front of `Animations.pack` — name, duration and
+   the ordered per-track bone list, straight out of the install. By default only clips authored on
+   this rig are shown (per-track values that are bone INDICES into it, 2155 of 2214); tick *show all*
+   to include the rest (59 exotic-skeleton clips store bone name-HASHES). Searchable by name.
 5. **Play** the selected clip: on click, the packfile is re-parsed and the clip's
    `hkaSplineCompressedAnimation` (the N-th spline anim in file order, where N is the clip's
    `index`) is decoded into a self-contained `SplineAnim`. Each frame it is sampled at the
@@ -110,27 +113,32 @@ Other flags:
 7. **Render** one draw per submesh, each binding its own diffuse (1×1 white when unassigned),
    modulated by two-sided lambert, with a ground grid, under an orbit camera.
 
-## Materials: why a picker, not a lookup
+## Materials: the engine's own binding, with a picker over it
 
 A prim carries a `materialHash` — a `pandemic_hash` of a name in the **WSAO** material library, which
-is what would name each material's textures. **WSAO is not present in the retail PC install** (an
-exhaustive raw + brute-zlib scan of all 42 archives finds no container, and none of Sean's material
-hashes appear anywhere); the corpus appears to be Xbox-360-only, and that build is big-endian, so
-using it means an endian-converting pipeline over pre-release data. See the memory note
-`wsao-material-format-and-gap`.
+names that material's textures. That library IS in the retail PC install, as the loose file
+`France.materials` at the game root (an earlier note here said it was absent; it was looked for
+inside the archives, and it is not in them). So the binding is the game's own:
 
-So the submesh→texture *identity* WSAO would give is supplied instead by:
+`drawcall materialHash` → WSMA record → WSTX slot 0 (colour) → DTEX by name-hash.
 
-- an **auto-seed** by body part (a heuristic — it will be wrong wherever one part uses several
-  textures, e.g. the head's eyes/mouth all seed to `Head_D`), and
+That covers every submesh of every assembled character (`--texcheck FBS_RS_Sean`: 186/186 bound).
+Two things sit on top of it:
+
+- a **name-suffix auto-seed**, used ONLY where WSAO cannot answer (a submesh with no material, or a
+  material absent from the table) — a heuristic, and wrong wherever one part uses several textures.
 - the **Materials picker** in the inspector: reassign any submesh to any texture in the character's
-  bundles (accessories like `CH_AC_Eyes_*` / `CH_AC_Mouth` are included), persisted to
-  `<mesh>.materials.json` next to the mesh. The sidecar wins over the auto-seed on the next run.
+  bundles (accessories like `CH_AC_Eyes_*` / `CH_AC_Mouth` included). A pick is a decision, so it
+  outranks both of the above and persists — beside the mesh for a `--mesh` file, else in
+  `%APPDATA%/sab_workshop/materials/<model>.materials.json`, keyed by model so one character's
+  edits never land on another's.
 
 ## Architecture
 
 ```
-main.rs        CLI / config (default paths, --megapack/--char), --selftest, --help
+main.rs        CLI / config (--game/--boot/--mesh overrides), --selftest, --help
+boot.rs        the startup model: a character assembled from the install, or a loose --mesh file
+bone_names.rs  bone name-hash -> name (a MESH stores only the hash)
 app.rs         winit event loop; owns all state; load → resolve textures → decode-on-select →
                skin → render; the egui shell (command bar, navigator, inspector, status,
                transport); the Materials picker + sidecar persistence; mouse camera control
@@ -151,8 +159,8 @@ editor.rs      the mod-editor pages (Templates / GameText / Icons) over the sab_
                each is a self-contained CentralPanel with a path field, Load/Save, and edit forms
 pack.rs        COPIED from tools/sab_pack: megapack index reader + pandemic_hash
 resolve.rs     character texture resolution: bundle sweep → DTEX records → role classify →
-               body-part auto-seed → `<mesh>.materials.json` sidecar load/save
-anim_index.rs  parse anim_bone_map.json → per-clip name / duration / track→bone map / playable
+               body-part auto-seed → materials sidecar load/save (per model)
+anim_index.rs  the clip catalog: the pack's own ANIM block (or a generated anim_bone_map.json)
 ```
 
 Data is right-handed, +Y up, metres (Havok/glTF) — the camera matches (`look_at_rh` +
@@ -160,8 +168,8 @@ Data is right-handed, +Y up, metres (Havok/glTF) — the camera matches (`look_a
 
 ### Known gaps / shortcuts
 
-- **Materials are heuristic, not resolved** — see *Materials: why a picker* above. WSAO is absent
-  from the PC build, so wrong slots are fixed by hand in the inspector.
+- **Materials resolve through WSAO** (`France.materials`) — see *Materials* above. The name-suffix
+  heuristic only fills in where the table has no answer, and any slot can be fixed by hand.
 - **Diffuse only.** The resolved `_N`/`_S`/`_WM` maps are listed and pickable but not yet used by
   the shader (no normal/spec lighting); textures are uploaded as `Rgba8Unorm` (no sRGB decode), to
   stay consistent with the flat/grid passes.

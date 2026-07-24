@@ -193,6 +193,195 @@ pub fn deploy(f: &Flags) -> Result<(), String> {
     Ok(())
 }
 
+// ═══════════════════ 50 Cent: real multi-part deploy ═══════════════════
+//
+// Unlike the Mattias deploy above — which had ONE merged mesh and therefore had to pick a single
+// slot and degenerate the rest — 50 Cent has three genuine parts, so each goes into the slot it
+// actually belongs in. That is the structural fix for the cutscene-invisibility bug: the
+// combined-LOD/cutscene path renders PER PART, so _HD/_UB/_LB all carrying real geometry means
+// every render path finds something.
+//
+// Slots are matched by NAME suffix read from the slot's own MSHA header, not by hardcoded hashes,
+// so outfit-specific bundles resolve correctly.
+
+/// Author a bundle placing each 50 Cent part in its matching named slot; unmatched mesh slots get the
+/// degenerate empty. Textures: the 50 Cent DTEX occupy the first N tex slots, the rest keep Sean's.
+#[allow(clippy::too_many_arguments)]
+fn author_bundle_50cent(
+    buf: &[u8],
+    b: &albs::Bundle,
+    parts: &[(&str, Vec<u8>)],
+    empty: &[u8],
+    texset: &[(u32, bool, Vec<u8>)],
+    place_tex: bool,
+) -> Result<(Vec<u8>, Vec<String>), String> {
+    let mut tables = b.tables.clone();
+    let trailing = &buf[b.tbl_end + b.data_ext..];
+    let mut data: Vec<u8> = Vec::new();
+    let mut cursor = 0u32;
+    let mut placed = Vec::new();
+
+    let mut place = |df: &mut albs::DynFile, blob: &[u8], usz: u32, cursor: &mut u32, data: &mut Vec<u8>| {
+        df[1] = *cursor;
+        df[2] = blob.len() as u32;
+        df[3] = usz;
+        data.extend_from_slice(blob);
+        *cursor += blob.len() as u32;
+    };
+
+    for cat in 0..4 {
+        for i in 0..tables[cat].len() {
+            if cat == 0 {
+                let df0 = tables[cat][i];
+                let orig_off = b.tbl_end + df0[1] as usize;
+                let slot_name = {
+                    let raw = &buf[orig_off + 20..orig_off + 276];
+                    let end = raw.iter().position(|&x| x == 0).unwrap_or(raw.len());
+                    String::from_utf8_lossy(&raw[..end]).into_owned()
+                };
+                // match this slot to a part by name suffix (_HD / _UB / _LB)
+                let up = slot_name.to_ascii_uppercase();
+                let chosen = parts.iter().find(|(pn, _)| up.ends_with(&format!("_{pn}"))).map(|(pn, m)| (*pn, m.as_slice()));
+                let blob = match chosen {
+                    Some((pn, m)) => {
+                        placed.push(format!("{slot_name} <- {pn}"));
+                        m
+                    }
+                    None => empty,
+                };
+                let re = reidentify_msha(blob, &slot_name, df0[0])?;
+                let usz = u32at(blob, 8);
+                let mut df = df0;
+                place(&mut df, &re, usz, &mut cursor, &mut data);
+                tables[cat][i] = df;
+            } else if cat == albs::CAT_TEX && place_tex && i < texset.len() {
+                let (hash, is_n, rec) = &texset[i];
+                let mut df = tables[cat][i];
+                df[0] = *hash;
+                df[5] = if *is_n { 1 } else { 0 };
+                let usz = dtex_uncompressed(rec);
+                place(&mut df, rec, usz, &mut cursor, &mut data);
+                tables[cat][i] = df;
+            } else {
+                let df0 = tables[cat][i];
+                let off = b.tbl_end + df0[1] as usize;
+                let blob = buf[off..off + df0[2] as usize].to_vec();
+                let mut df = df0;
+                place(&mut df, &blob, df0[3], &mut cursor, &mut data);
+                tables[cat][i] = df;
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(8 + b.tbl_end + data.len() + trailing.len());
+    out.extend_from_slice(b"ALBS");
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for cat in 0..4 {
+        for df in &tables[cat] {
+            for &w in df {
+                out.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+    }
+    out.extend_from_slice(&data);
+    out.extend_from_slice(trailing);
+    Ok((out, placed))
+}
+
+pub fn deploy_50cent(f: &Flags) -> Result<(), String> {
+    let portdir = std::path::PathBuf::from(if f.out == "patchdynamic0.megapack" { "50cent_port".into() } else { f.out.clone() });
+    let game = &f.game;
+    if game.is_empty() {
+        return Err("--game <SaboteurDir> is required".into());
+    }
+
+    println!("[1] loading 50 Cent port outputs from {}", portdir.display());
+    let mut parts: Vec<(&str, Vec<u8>)> = Vec::new();
+    for pn in ["HD", "UB", "LB"] {
+        let p = portdir.join(format!("pmc_hum_50cent_{pn}.msha"));
+        let b = std::fs::read(&p).map_err(|e| format!("read {}: {e} (run `sab_poc 50cent-encode` first)", p.display()))?;
+        println!("    _{pn}: {} B", b.len());
+        parts.push((pn, b));
+    }
+    let empty = std::fs::read(portdir.join("pmc_empty.msha")).map_err(|e| format!("read pmc_empty.msha: {e}"))?;
+    let patched_wsao = std::fs::read(portdir.join("France.materials"))
+        .map_err(|e| format!("read patched WSAO: {e} (run `sab_poc 50cent-tex` first)"))?;
+
+    // Deterministic texture order + role flags, rebuilt from the same naming the DTEX stage used.
+    let roles = crate::gltf::glb_material_textures(&f.gltf)?;
+    let mut texset: Vec<(u32, bool, Vec<u8>)> = Vec::new();
+    for i in 0..roles.len() {
+        for (role, is_n) in [("d", false), ("s", false), ("n", true)] {
+            let hash = pack::pandemic_hash(&format!("50cent_m{i}_{role}"));
+            let p = portdir.join("dtex").join(format!("{hash:08X}.dtex"));
+            let raw = std::fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
+            let rec = if raw.len() > 4 && &raw[0..4] == b"DTEX" { raw[4..].to_vec() } else { raw };
+            texset.push((hash, is_n, rec));
+        }
+    }
+    println!("    {} DTEX, empty filler {} B", texset.len(), empty.len());
+
+    let mp = pack::Megapack::open(&format!("{game}/Global/Dynamic0.megapack"))?;
+    let dyns = albs::load_dyns(game)?;
+    let sean: Vec<&albs::Dyn> = dyns.iter().filter(|d| d.name.starts_with("FBS_RS_Sean")).collect();
+    println!("[2] authoring {} FBS_RS_Sean* bundle(s) — each part into its own named slot", sean.len());
+
+    let mut patch_bundles: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+    for d in &sean {
+        let Some(entry) = mp.entries().iter().find(|e| e.index == d.asset_index).copied() else {
+            eprintln!("    skip {} (not in Dynamic0)", d.name);
+            continue;
+        };
+        let sub = mp.slice(&entry);
+        let b = match albs::parse_bundle(sub, d) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("    skip {} (parse: {e})", d.name);
+                continue;
+            }
+        };
+        let place_tex = d.asset_index == SEAN_PLAYER_INDEX;
+        if place_tex && b.tables[albs::CAT_TEX].len() < texset.len() {
+            return Err(format!("base bundle has {} tex slots, need {}", b.tables[albs::CAT_TEX].len(), texset.len()));
+        }
+        let (nb, placed) = author_bundle_50cent(sub, &b, &parts, &empty, &texset, place_tex)?;
+        println!("    {} ({} mesh slots): {}", d.name, b.tables[0].len(), if placed.is_empty() { "no matching part slots — all degenerate".to_string() } else { placed.join(", ") });
+        patch_bundles.push((entry.crc, entry.index, nb));
+    }
+    if patch_bundles.is_empty() {
+        return Err("no FBS_RS_Sean* bundles found to override".into());
+    }
+
+    println!("[3] writing patch megapack ({} bundle(s)) + verifying it re-reads", patch_bundles.len());
+    let patch_path = portdir.join("patchdynamic0.megapack");
+    albs::write_patch_megapack(patch_path.to_str().unwrap(), &patch_bundles)?;
+    let vmp = pack::Megapack::open(patch_path.to_str().unwrap())?;
+    let ve = *vmp.entries().first().ok_or("patch empty")?;
+    if !vmp.slice(&ve).windows(4).any(|w| w == b"AHSM") {
+        return Err("patch bundle has no MSHA — mesh write failed".into());
+    }
+    println!("    OK — patch re-reads, mesh present");
+
+    println!("[4] installing (reversible)");
+    let dst_patch = format!("{game}/Global/patchdynamic0.megapack");
+    std::fs::copy(&patch_path, &dst_patch).map_err(|e| format!("install patch: {e}"))?;
+    println!("    + {dst_patch}");
+    let fm = format!("{game}/France.materials");
+    let bak = format!("{game}/France.materials.bak");
+    if !std::path::Path::new(&bak).exists() {
+        std::fs::copy(&fm, &bak).map_err(|e| format!("backup France.materials: {e}"))?;
+        println!("    backed up France.materials -> France.materials.bak");
+    } else {
+        println!("    kept existing France.materials.bak (the clean original)");
+    }
+    std::fs::write(&fm, &patched_wsao).map_err(|e| format!("install France.materials: {e}"))?;
+    println!("    installed patched France.materials ({} B)", patched_wsao.len());
+
+    println!("\nDEPLOYED — 50 Cent is the player character, split across HD/UB/LB.");
+    println!("Uninstall:  del \"{dst_patch}\"   &&   copy /Y \"{bak}\" \"{fm}\"");
+    Ok(())
+}
+
 /// How to fill the 8 mesh slots of the player bundle.
 #[derive(Clone, Copy)]
 enum Fill {

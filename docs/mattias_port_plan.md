@@ -133,8 +133,9 @@ lists, `faceType==1`), 4-bone skin (UNORM8 weights / UINT8 indices), material gr
 > position, which catches a mis-mapped bone (a hand vertex bound to a foot bone would be ~1 m away):
 > **median 0.13 m, p95 0.26 m, max 0.48 m; 99.5% of vertices within 0.40 m of their bound bone.** That
 > is exactly a limb-radius envelope — the remap connected geometry to the right bones. It also exports
-> `pmc_hum_mattias.smsh` for the workshop viewer. **The visual gate remains the user's:** load that SMSH
-> against `CH_AL_SeanDevlin.skel` + `Animations.pack` in `sab_workshop` and eyeball idle/walk/aim. The
+> `pmc_hum_mattias.smsh` for the workshop viewer. **The visual gate remains the user's:** open it with
+> `sab_workshop --mesh pmc_hum_mattias.smsh` — which rigs it on Sean's skeleton straight from the
+> install, so no `.skel` file is involved — and eyeball idle/walk/aim. The
 > headless coherence is a pre-check, not a substitute for watching the animated deformation.
 
 Re-skin Mattias onto Sean's skeleton so Saboteur animation clips drive him. **The correspondence is a
