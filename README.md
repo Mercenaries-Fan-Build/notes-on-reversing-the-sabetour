@@ -12,7 +12,10 @@ transfers and what does not. Do not assume a Mercs 2 fact holds here without che
 ## Why this game is a good RE target
 
 - **The retail (GOG) `Saboteur.exe` is a clean, fully-unpacked binary.** No SecuROM wall: `.text`
-  entropy is flat ~6.2–6.7 across all 11.9 MB, the entry point is in normal code, and the leftover
+  entropy over all 11.9 MB averages **6.49**, with no 64 KiB window above **6.84** — nowhere near the
+  >7.5 of packed or encrypted code *(corrected 2026-07-24: was "flat ~6.2–6.7"; 22.5% of the 182
+  64 KiB windows fall outside that band — see [`docs/binary_recon.md`](docs/binary_recon.md))*. The
+  entry point is in normal code, and the leftover
   `.secu` section is inert. The whole engine is directly disassemblable.
 - **2,765 RTTI class names in the clear** (`WS*` = WildStar engine, `Pbl*`/`Pcl*` = Pebble core),
   plus **898 named Lua bindings** and **321 uncompressed Lua 5.1 scripts**. Effectively a symbol map.
@@ -39,12 +42,24 @@ docs/
   lineage_and_divergence.md   ★ shared-vs-different vs Mercenaries 2 — READ FIRST
   binary_recon.md             the clean-exe recon (sections, RTTI, bindings, scripts)
   community_tooling.md        community tool landscape + where we can contribute
-  formats/
+  mattias_port_plan.md        the staged character-port project
+  tools/                      ★ THE MODDING TOOLSET — start at tools/README.md
+    README.md                 what each tool is, and an "I want to…" index
+    workflows/                cross-tool recipes: replace-a-texture, add-ui-text, port-a-character
+  formats/                    byte-level specs behind the tools
     lua_scripts.md            ★ .luap packs — flat, uncompressed, the cheapest way in
     archive_and_models.md     MP00 megapack → SBLA → MSHA → flat MESH; patch-megapack override
+    megapack_write.md · sbla_subpack.md · mesh_geometry.md · skeleton.md
+    dtex_texture.md · gametext.md · gametemplates.md · map6.md
     audio_1kcp.md             the 1KCP Wwise package + extraction pipeline
-    animation_havok65.md      AP0L pack, Havok 6.5, the community anim-decode gap
-tools/
+    animation_havok65.md      AP0L pack, Havok 6.5 — the community anim-decode gap, cracked
+tools/                        the modding toolset — each crate's README is its manual
+  sab_workshop/               the GUI: character/anim viewer + Templates/GameText/Icons editor
+  sab_pack/ sab_dtex/ sab_sbla/ sab_gametext/ sab_gametemplates/   read + write the game's formats
+  sab_mesh/ sab_skeleton/ sab_havok65/ sab_animmeta/               asset extraction → glTF
+  sab_validator/              parses a mod the way the engine's mount path does
+  sab_formats/                the shared codec library the others build on
+  sab_probe/ sab_map6/ sab_asi/                                    inspection + live engine reads
   saboteur_audio/             Rust: 1KCP → .wem carve → vgmstream → WAV (all VO extracted)
   ghidra/DecompileSaboteur.java   headless full-binary decompile export
 data/
@@ -52,6 +67,10 @@ data/
   havok_version_evidence.txt
 memory/                       durable session notes (MEMORY.md is the index)
 ```
+
+**Modding the game rather than reversing it?** Go straight to
+[`docs/tools/README.md`](docs/tools/README.md) — the toolset index and the task-oriented guides.
+Prebuilt Windows binaries are on the [Releases](../../releases) page.
 
 ## Status
 
@@ -61,7 +80,7 @@ memory/                       durable session notes (MEMORY.md is the index)
 | Full decomp | ✅ 36,935 functions (local, regenerable) |
 | Audio / VO | ✅ extraction pipeline built; 80,872 WAV lines extracted (all 4 langs) |
 | Lua scripts | ✅ `.luap` format cracked from decomp + verified vs retail; all 321 scripts decompiled (116,681 lines) |
-| Archive/model format | 📓 documented (from decomp + SaboteurToolset cross-ref); no reader written yet |
+| Archive/model format | ✅ documented (decomp + SaboteurToolset cross-ref) **and implemented** — `sab_pack`, `sab_sbla`, `sab_mesh`, `sab_skeleton`, `sab_map6` read them (several also write) *(corrected 2026-07-24: previously said "no reader written yet")* |
 | Animation decode (Havok 6.5) | ✅ **cracked** — corpus is 100% `hkaSplineCompressedAnimation`; decoder in `tools/sab_havok65` decodes all 2,214 clips (0 failures). Was the flagship community-wide gap. |
 
 ## Provenance / assets

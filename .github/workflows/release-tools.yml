@@ -127,7 +127,12 @@ jobs:
         run: |
           $name = '${{ steps.ver.outputs.name }}'
           $root = "dist/$name"
-          New-Item -ItemType Directory -Force -Path "$root/docs", "$root/licenses", "$root/sab_asi", 'dist/pdb' | Out-Null
+          # The docs tree MIRRORS the repo layout (docs/tools, docs/formats, tools/<crate>/README.md)
+          # so every relative link inside the shipped markdown still resolves offline. Flattening it
+          # would be tidier on disk and would break every cross-reference.
+          New-Item -ItemType Directory -Force -Path `
+            "$root/docs/tools/workflows", "$root/docs/formats", `
+            "$root/licenses", "$root/sab_asi", 'dist/pdb' | Out-Null
 
           # Final binaries sit directly in target/release (per-crate, since there is no workspace);
           # intermediate artifacts live in target/release/deps, so a top-level *.exe glob is exact.
@@ -142,16 +147,33 @@ jobs:
               $pdb = Join-Path $rel "$($exe.BaseName).pdb"
               if (Test-Path $pdb) { Copy-Item $pdb 'dist/pdb' }
             }
-            # Each tool's own README is its manual — ship it next to the binary.
+            # Each tool's own README is its manual. Keep it at its repo path so the links in it
+            # (../../docs/formats/...) resolve inside the bundle.
             $readme = "tools/$crate/README.md"
-            if (Test-Path $readme) { Copy-Item $readme "$root/docs/$crate.md" }
+            if (Test-Path $readme) {
+              New-Item -ItemType Directory -Force -Path "$root/tools/$crate" | Out-Null
+              Copy-Item $readme "$root/tools/$crate/README.md"
+            } else {
+              Write-Host "::warning::$crate ships with no README.md — it will have no manual in the bundle"
+            }
           }
           if ($tools.Count -eq 0) { throw 'nothing was staged — the build step produced no .exe' }
+
+          # The index + task guides: the entry point a modder actually reads first.
+          if (-not (Test-Path 'docs/tools/README.md')) { throw 'missing docs/tools/README.md — the toolset index' }
+          Copy-Item 'docs/tools/README.md' "$root/docs/tools/README.md"
+          Copy-Item 'docs/tools/workflows/*.md' "$root/docs/tools/workflows"
+          # Format specs travel too: they are what the per-tool manuals link to for byte layout.
+          Copy-Item 'docs/formats/*.md' "$root/docs/formats"
 
           $asi = 'tools/sab_asi/target/i686-pc-windows-msvc/release/sab_asi.dll'
           if (-not (Test-Path $asi)) { throw "missing $asi" }
           Copy-Item $asi "$root/sab_asi"
-          if (Test-Path 'tools/sab_asi/README.md') { Copy-Item 'tools/sab_asi/README.md' "$root/sab_asi/README.md" }
+          if (Test-Path 'tools/sab_asi/README.md') {
+            Copy-Item 'tools/sab_asi/README.md' "$root/sab_asi/README.md"
+            New-Item -ItemType Directory -Force -Path "$root/tools/sab_asi" | Out-Null
+            Copy-Item 'tools/sab_asi/README.md' "$root/tools/sab_asi/README.md"
+          }
           $asiPdb = 'tools/sab_asi/target/i686-pc-windows-msvc/release/sab_asi.pdb'
           if (Test-Path $asiPdb) { Copy-Item $asiPdb 'dist/pdb' }
 
@@ -169,7 +191,12 @@ jobs:
             'Windows x64 command-line tools, except sab_asi/sab_asi.dll which is 32-bit'
             'because it is injected into the 32-bit Saboteur.exe.'
             ''
-            'Every tool prints its usage when run with no arguments. Per-tool manuals are in docs/.'
+            'START HERE:  docs/tools/README.md'
+            '    what each tool is, and an "I want to..." index.'
+            'Task guides:  docs/tools/workflows/   (replace a texture, add UI text, port a character)'
+            'Per-tool manuals: tools/<tool>/README.md      Format specs: docs/formats/'
+            ''
+            'Every tool also prints its usage when run with no arguments.'
             ''
             'Included:'
           ) + ($tools | Sort-Object | ForEach-Object { "  $_.exe" }) + @(
@@ -177,8 +204,11 @@ jobs:
             ''
             'sab_workshop.exe is the GUI: character/animation viewer plus the mod-editor pages.'
             'sab_validator.exe checks a mod the way the engine mount path would parse it.'
+            'Run it on your mod before launching the game.'
             ''
             'These tools ship no game data. You need your own copy of The Saboteur.'
+            'Mods built with these install as a patch*.megapack override - never overwrite a'
+            'base archive; uninstalling should always be deleting one file.'
           )
           $lines | Set-Content "$root/README.txt" -Encoding utf8
 
@@ -186,7 +216,9 @@ jobs:
           # dumping 14 loose exes into whatever folder the user unzipped from.
           Compress-Archive -Path $root -DestinationPath "dist/$name.zip"
           # The workshop is the headline tool; publish it standalone so nobody has to pull 14 binaries.
-          Compress-Archive -Path "$root/sab_workshop.exe", "$root/README.txt", "$root/LICENSE", "$root/licenses" `
+          # Its own manual rides along — a GUI with no docs is the one thing worse than a CLI with none.
+          Compress-Archive -Path "$root/sab_workshop.exe", "$root/README.txt", "$root/LICENSE", `
+                                 "$root/licenses", "$root/tools/sab_workshop" `
                            -DestinationPath "dist/sab_workshop-${{ steps.ver.outputs.version }}-win64.zip"
           if (Test-Path 'dist/pdb/*') {
             Compress-Archive -Path 'dist/pdb/*' -DestinationPath "dist/$name-pdb.zip"
