@@ -1,0 +1,15 @@
+[package]
+name = "sab_probe"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only interrogation of The Saboteur (2009) game data — answers questions about the assets, changes nothing"
+
+[[bin]]
+name = "sab_probe"
+path = "src/main.rs"
+
+[dependencies]
+flate2 = "1"
+
+[profile.release]
+opt-level = 3

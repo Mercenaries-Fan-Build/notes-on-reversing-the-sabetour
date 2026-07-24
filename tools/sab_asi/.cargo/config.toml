@@ -1,0 +1,3 @@
+# The Saboteur is a 32-bit process — the DLL MUST be i686 or it won't load.
+[build]
+target = "i686-pc-windows-msvc"

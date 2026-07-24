@@ -1,0 +1,15 @@
+[package]
+name = "sab_asi"
+version = "0.1.0"
+edition = "2021"
+description = "In-process engine SDK for The Saboteur (x86): MinHook detours + a Dev.* Lua binding surface."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+minhook-sys = "0.1"
+
+[profile.release]
+panic = "abort"   # a Rust unwind across the FFI/thiscall boundary is UB; abort instead.
+opt-level = 2

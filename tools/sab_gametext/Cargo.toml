@@ -1,0 +1,12 @@
+[package]
+name = "sab_gametext"
+version = "0.1.0"
+edition = "2021"
+description = "Reader/writer for The Saboteur (2009) GameText.dlg (TXTD records) localized-text container"
+
+[[bin]]
+name = "sab_gametext"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

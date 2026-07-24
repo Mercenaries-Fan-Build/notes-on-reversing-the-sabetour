@@ -1,0 +1,21 @@
+[package]
+name = "sab_poc"
+version = "0.1.0"
+edition = "2021"
+description = "Bundle of The Saboteur RE proof-of-concepts (texture repack, mesh round-trip). Temporary home while the toolset is still being factored out; commands graduate to real tools once their shape is clear."
+license = "MIT"
+
+[[bin]]
+name = "sab_poc"
+path = "src/main.rs"
+
+[dependencies]
+# Megapack/ALBS/DTEX/MSHA payloads are zlib. std-only otherwise — POCs stay dependency-light on purpose.
+flate2 = "1"
+# glTF ingest (Mattias source) is JSON + a .bin buffer; serde_json reads the JSON chunk.
+serde_json = "1"
+# Mattias textures are exported as PNG; decode them for BC encoding into DTEX.
+png = "0.17"
+
+[profile.release]
+opt-level = 3

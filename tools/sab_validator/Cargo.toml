@@ -1,0 +1,17 @@
+[package]
+name = "sab_validator"
+version = "0.1.0"
+edition = "2021"
+description = "The Saboteur (2009) mod validator: parses game assets the way the engine's mount path does (megapack -> ALBS -> asset) and reports anything the engine would choke on. Every rule cites the decomp function it is derived from."
+license = "MIT"
+
+[[bin]]
+name = "sab_validator"
+path = "src/main.rs"
+
+[dependencies]
+# Saboteur asset parsers (which in turn reuse the shared Pandemic primitives from mercs2_formats).
+sab_formats = { path = "../sab_formats" }
+
+[profile.release]
+opt-level = 3
