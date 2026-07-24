@@ -186,6 +186,29 @@ pub fn decode(buf: &[u8]) -> Result<CpuTexture, String> {
     Ok(CpuTexture { name: d.name, width: w, height: h, format: d.format, rgba })
 }
 
+/// Decode the SMALLEST mip whose long edge still covers `min_dim` — a cheap preview.
+///
+/// The contact sheet shows a couple of hundred records at ~112px. Decoding each one's finest mip
+/// (routinely 1024²) would cost seconds and hundreds of MB of RGBA to produce pixels that are then
+/// scaled away. Mip N is the artist's own downsample, so picking it is both cheaper AND better
+/// looking than box-filtering mip 0 ourselves. Falls back to the finest mip when every mip is
+/// already smaller than `min_dim` (a tiny texture has nothing to spare).
+pub fn decode_preview(buf: &[u8], min_dim: u32) -> Result<CpuTexture, String> {
+    let d = parse(buf)?;
+    let pl = payload(&d)?;
+    let mips = mips_of(&d, &pl);
+    // `mips_of` is largest-first, so scanning in reverse finds the smallest adequate mip first.
+    let pick = mips
+        .iter()
+        .rev()
+        .find(|(_, w, h, _)| (*w).max(*h) >= min_dim)
+        .or_else(|| mips.first())
+        .ok_or("DTEX has no mips")?;
+    let (_, w, h, data) = *pick;
+    let rgba = decode_surface(d.format, w, h, data)?;
+    Ok(CpuTexture { name: d.name, width: w, height: h, format: d.format, rgba })
+}
+
 /// Decode one surface of `fmt` at `w`x`h` from `data` to RGBA8.
 fn decode_surface(fmt: u32, w: u32, h: u32, data: &[u8]) -> Result<Vec<u8>, String> {
     let (w, h) = (w as usize, h as usize);

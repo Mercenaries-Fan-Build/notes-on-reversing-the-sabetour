@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 /// One skeleton bone (rest/bind pose, parent link, inverse-bind for skinning).
+#[derive(Clone)]
 pub struct Bone {
     pub parent: i32, // -1 for a root
     pub name: String,
@@ -14,6 +15,13 @@ pub struct Bone {
     pub r: [f32; 4], // xyzw
     pub s: [f32; 3],
     pub inv_bind: Option<[f32; 16]>, // row-major inverse bind matrix
+    /// The bone's exact LOCAL transform (row-major), when a TRS triple cannot represent it.
+    ///
+    /// `Mat4::to_scale_rotation_translation` silently loses shear and mis-signs mirrored axes, so a
+    /// matrix -> TRS -> matrix round trip is not lossless. Assembly derives locals from corrected
+    /// world matrices and must hand the renderer exactly what it computed — measured deviation
+    /// through the TRS round trip was 2.7, i.e. the mesh was deformed before any clip played.
+    pub local_m: Option<[f32; 16]>,
 }
 
 /// One draw-range / sub-mesh: a contiguous slice of the index buffer with the material that
@@ -221,6 +229,7 @@ pub fn read_skel(text: &str) -> Vec<Bone> {
             None
         };
         out.push(Bone {
+            local_m: None,
             parent: f[0].parse().unwrap_or(-1),
             name: f[1].to_string(),
             t: [p(2), p(3), p(4)],

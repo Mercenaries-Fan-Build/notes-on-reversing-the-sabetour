@@ -11,18 +11,23 @@
 
 mod anim_index;
 mod app;
+mod assets;
 mod camera;
 mod dtex;
+mod editor;
 mod formats;
 mod gui;
 mod havok;
 mod meshload;
+mod models;
 mod pack;
 mod render;
 mod resolve;
 mod skinning;
+mod wsao;
 
 /// Resolved input paths (CLI overrides the built-in defaults).
+#[derive(Clone)]
 pub struct Config {
     pub mesh: String,
     pub skel: String,
@@ -34,6 +39,11 @@ pub struct Config {
     pub char_token: String,
     /// The shared palette archive — props/vehicles keep their skins here rather than beside the mesh.
     pub palettes: String,
+    /// Optional WSAO material library (`France.materials`). When set, textures resolve the engine's way
+    /// (submesh material hash → material record → texture hashes) instead of the name heuristic.
+    pub wsao: Option<String>,
+    /// Directory of loose `<hash>.dtex` files (from `sab_poc mattias`) to load WSAO-resolved textures from.
+    pub dtex_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -46,6 +56,8 @@ impl Default for Config {
             megapack: "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack".into(),
             char_token: "SeanDevlinn".into(),
             palettes: "C:/GOG Games/The Saboteur/Global/Palettes0.megapack".into(),
+            wsao: None,
+            dtex_dir: None,
         }
     }
 }
@@ -67,6 +79,8 @@ fn main() {
     if let Some(v) = get("--megapack") { cfg.megapack = v; }
     if let Some(v) = get("--char") { cfg.char_token = v; }
     if let Some(v) = get("--palettes") { cfg.palettes = v; }
+    if let Some(v) = get("--wsao") { cfg.wsao = Some(v); }
+    if let Some(v) = get("--dtexdir") { cfg.dtex_dir = Some(v); }
 
     // Headless verification of the load -> decode -> skin path (no window). Optional clip index
     // into the playable list: `--selftest [N]`.
@@ -77,6 +91,11 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--selftest") {
         let n: usize = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
         std::process::exit(app::selftest(cfg, n));
+    }
+    // Headless texture-binding verification: `--texcheck [nameSubstr]` (default all assets).
+    if let Some(i) = args.iter().position(|a| a == "--texcheck") {
+        let filter = args.get(i + 1).filter(|s| !s.starts_with("--")).cloned().unwrap_or_default();
+        std::process::exit(app::texcheck(cfg, &filter));
     }
 
     app::run(cfg);

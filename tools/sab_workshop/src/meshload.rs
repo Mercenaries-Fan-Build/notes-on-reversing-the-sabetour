@@ -73,6 +73,27 @@ pub struct LoadedMesh {
     pub prim_parent_bone: Vec<u16>,
     /// Per-bone name hash, for matching an attachment bone across parts.
     pub bone_hashes: Vec<u32>,
+    /// The asset's OWN inverse-bind for each bone this part SKINS, keyed by bone name-hash
+    /// (row-major, as stored). This is ground truth: the derived `world[i] = world[parent] · local[i]`
+    /// chain disagrees with it — a character's face bones have on-disk local translations of
+    /// (0,0,0), so the chain collapses that subtree onto one point and only these matrices know
+    /// where the face really is. Pooled across parts during assembly (see `assemble`).
+    pub stored_ibm: std::collections::HashMap<u32, [f32; 16]>,
+    /// `(part name, index_start, index_count)` per source part, in merge order.
+    ///
+    /// Each part ships its OWN texture bundle, so a character cannot be textured from one pool —
+    /// this is what lets the resolver seed each part's submeshes from that part's own textures
+    /// instead of smearing the first bundle it found across the whole body.
+    pub part_ranges: Vec<(String, u32, u32)>,
+}
+
+/// First offset of `needle` in `buf` at or after `from` (small linear scan — used only over a
+/// sub-pack's ALBS header/directory, a few KB).
+fn find_subseq(buf: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if from >= buf.len() {
+        return None;
+    }
+    buf[from..].windows(needle.len()).position(|w| w == needle).map(|i| from + i)
 }
 
 fn parse_msha_header(buf: &[u8], off: usize) -> Option<(String, u32, u32, u32, u32)> {
@@ -103,19 +124,31 @@ fn zlib_inflate(data: &[u8], expected: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// List every MSHA model in `buf` (a whole megapack). Header-only — no inflate.
-pub fn list_meshes(buf: &[u8]) -> Vec<MeshEntry> {
+/// List every MSHA model in a megapack — **near-instant**, by walking the MSHA chain rather than
+/// scanning the 715 MB.
+///
+/// The MSHA wrappers in a bundle are **contiguous**: the first sits right after the ALBS directory,
+/// and `next = pos + 276 + compressedSize0 + compressedSize1` reaches the next one exactly (verified
+/// bit-for-bit: chain-walk == full-file scan, 6807 == 6807 meshes across all 759 Dynamic0 bundles,
+/// zero mismatches). So we read only the 276-byte headers (~2 MB total for 6807 meshes) and skip every
+/// compressed blob — the ALBS layout is the earmark. Header-only; no inflate.
+pub fn list_meshes(mp: &crate::pack::Megapack) -> Vec<MeshEntry> {
     let mut out = Vec::new();
-    let mut i = 0usize;
-    while i + 276 <= buf.len() {
-        if &buf[i..i + 4] == b"AHSM" {
-            if let Some((name, c0, unc0, c1, unc1)) = parse_msha_header(buf, i) {
-                if c0 > 0 && unc0 > 0 && (c0 as usize) <= buf.len() {
-                    out.push(MeshEntry { name, file_off: i, comp0: c0, unc0, comp1: c1, unc1 });
-                }
+    for e in mp.entries() {
+        let sub = mp.slice(e);
+        let base = e.offset as usize;
+        // The first MSHA sits just past the ALBS header + directory (a few KB); find it, then chain.
+        let Some(first) = find_subseq(sub, b"AHSM", 0x20) else { continue };
+        let mut p = first;
+        while p + 276 <= sub.len() && &sub[p..p + 4] == b"AHSM" {
+            // A garbage/non-printable header ends the chain (we've walked past the MSHA region).
+            let Some((name, c0, unc0, c1, unc1)) = parse_msha_header(sub, p) else { break };
+            if c0 > 0 && unc0 > 0 {
+                out.push(MeshEntry { name, file_off: base + p, comp0: c0, unc0, comp1: c1, unc1 });
             }
+            // Advance by the true record stride regardless, so the chain stays aligned.
+            p += 276 + c0 as usize + c1 as usize;
         }
-        i += 1;
     }
     out
 }
@@ -146,7 +179,9 @@ pub fn load(buf: &[u8], e: &MeshEntry) -> Result<LoadedMesh, String> {
     crate::formats::bind_rigid_attachments(&mut mesh, &crate::skinning::bind_world(&tail.bones));
     let prim_parent_bone = tail.draws.iter().map(|d| d.parent_bone).collect();
     let bone_hashes = tail.bone_hashes.clone();
-    Ok(LoadedMesh { name: e.name.clone(), mesh, bones: tail.bones, prim_parent_bone, bone_hashes })
+    let stored_ibm = tail.stored_ibm.clone();
+    let part_ranges = vec![(e.name.clone(), 0u32, mesh.indices.len() as u32)];
+    Ok(LoadedMesh { name: e.name.clone(), mesh, bones: tail.bones, prim_parent_bone, bone_hashes, stored_ibm, part_ranges })
 }
 
 struct Stream {
@@ -164,6 +199,8 @@ struct DrawCall { primitive_index: u32, material: u32, parent_bone: u16 }
 struct MeshTail {
     bones: Vec<Bone>,
     bone_hashes: Vec<u32>,
+    /// bone name-hash -> the asset's own inverse-bind, for the bones this part skins.
+    stored_ibm: std::collections::HashMap<u32, [f32; 16]>,
     bone_ids: Vec<u8>,
     remaps: Vec<u32>, // boneRemap[i].boneId
     streams: Vec<Stream>,
@@ -290,11 +327,13 @@ fn parse_mesh(body: &[u8]) -> Result<MeshTail, String> {
                 r,
                 s,
                 inv_bind: Some(rm),
+                local_m: None,
             }
         })
         .collect();
 
     // ---- tail ----
+    let mut stored_ibm: std::collections::HashMap<u32, [f32; 16]> = Default::default();
     let mut remaps = Vec::with_capacity(num_bone_remaps);
     if num_bone_remaps > 0 {
         let guard = u32at(body, p) as usize;
@@ -303,7 +342,17 @@ fn parse_mesh(body: &[u8]) -> Result<MeshTail, String> {
         }
         p += 8; // guard + null32
         for _ in 0..num_bone_remaps {
-            remaps.push(u32at(body, p + 64)); // after the 64-byte ibm
+            let bone_id = u32at(body, p + 64); // after the 64-byte ibm
+            // Keep the ibm rather than skipping it — it is the only correct source for this bone's
+            // bind pose, and assembly pools these across a character's parts.
+            if let Some(&h) = name_hashes.get(bone_id as usize) {
+                let mut raw = [0f32; 16];
+                for k in 0..16 {
+                    raw[k] = f32at(body, p + k * 4);
+                }
+                stored_ibm.insert(h, raw);
+            }
+            remaps.push(bone_id);
             p += 68;
         }
     }
@@ -343,7 +392,7 @@ fn parse_mesh(body: &[u8]) -> Result<MeshTail, String> {
         p += 16;
     }
 
-    Ok(MeshTail { bones, bone_hashes: name_hashes, bone_ids, remaps, streams, prims, draws })
+    Ok(MeshTail { bones, bone_hashes: name_hashes, stored_ibm, bone_ids, remaps, streams, prims, draws })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -516,6 +565,68 @@ fn decode_geometry(tail: &MeshTail, dat: &[u8]) -> Result<Smsh, String> {
 }
 
 #[cfg(test)]
+mod bbox_tests {
+    use super::*;
+
+    /// Compute the correct MESH bounding volume (@76 size.xyz / @88 radius=½·|size| / @92 center.xyz)
+    /// from decoded geometry, for Sean's Mattias parts in the mod pack — the fix for the port's
+    /// zero/wrong bbox (cutscene frustum-culls the body → invisible). Validates the method on the
+    /// vanilla parts first (their stored bbox is known-good), then prints values to bake into the port.
+    #[test]
+    fn sean_bbox_from_geometry() {
+        let parts = [
+            "CH_AL_SeanDevlin_01_LB",
+            "CH_AL_SeanDevlin_01_UB",
+            "CH_AL_SeanDevlin_01_GR",
+            "CH_AL_SeanDevlin_01_HD",
+            "CH_AL_SeanDevlin_01_HAT",
+        ];
+        for pk in ["patchdynamic0.megapack", "Dynamic0.megapack"] {
+            let path = format!("C:/GOG Games/The Saboteur/Global/{pk}");
+            if !std::path::Path::new(&path).exists() {
+                eprintln!("skip: {path} not present");
+                continue;
+            }
+            let buf = std::fs::read(&path).unwrap();
+            let list = list_meshes(&buf);
+            eprintln!("\n=== {pk} ===");
+            for part in parts {
+                let Some(e) = list.iter().find(|e| e.name.eq_ignore_ascii_case(part)) else {
+                    eprintln!("  {part:32} <not in pack>");
+                    continue;
+                };
+                let lm = match load(&buf, e) {
+                    Ok(l) => l,
+                    Err(err) => {
+                        eprintln!("  {part:32} load err: {err}");
+                        continue;
+                    }
+                };
+                let ps = &lm.mesh.positions;
+                if ps.is_empty() {
+                    eprintln!("  {part:32} 0 verts");
+                    continue;
+                }
+                let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for p in ps {
+                    for k in 0..3 {
+                        mn[k] = mn[k].min(p[k]);
+                        mx[k] = mx[k].max(p[k]);
+                    }
+                }
+                let size = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
+                let ctr = [(mx[0] + mn[0]) * 0.5, (mx[1] + mn[1]) * 0.5, (mx[2] + mn[2]) * 0.5];
+                let r = 0.5 * (size[0] * size[0] + size[1] * size[1] + size[2] * size[2]).sqrt();
+                eprintln!(
+                    "  {part:32} verts={:5} size=({:.4},{:.4},{:.4}) r={:.4} center=({:.4},{:.4},{:.4})",
+                    ps.len(), size[0], size[1], size[2], r, ctr[0], ctr[1], ctr[2]
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -613,4 +724,309 @@ mod hat_tests {
             }
         }
     }
+}
+
+/// Assemble a whole character from its parts, the way the game does.
+///
+/// A character is not one mesh: `assets::Asset` resolves it — from the game's own GameTemplates —
+/// into an `FxHumanHead` plus several `FxHumanBodyPart` meshes (HD, UB, LB, GR, HAT…). Showing one
+/// of those is showing a floating torso; this stitches them into the figure.
+///
+/// Two things make it non-trivial, both learned the hard way:
+///
+/// 1. **Bone INDEX is not portable between parts.** Each part carries its own PRUNED rig with its
+///    own ordering — for Sean, 175 of 191 indices name a different bone in a different part. The
+///    name-hash IS stable (it is the key the animation system itself uses), so every part's joints
+///    are re-keyed onto one canonical skeleton by hash. Concatenating without that silently rigs the
+///    head to the glove's bones, and looks perfect at bind pose.
+/// 2. **The derived bind pose is wrong where it matters most.** `world[i] = world[parent] · local[i]`
+///    disagrees with the asset's own inverse-bind matrices, because a character's face bones store a
+///    local translation of (0,0,0) and the chain collapses that whole subtree onto one point. Every
+///    part ships correct matrices for the bones IT skins, so assembling — which loads every part —
+///    is exactly when the union becomes available. We pool them and fix the canonical skeleton.
+pub fn assemble(buf: &[u8], parts: &[MeshEntry]) -> Result<LoadedMesh, String> {
+    if parts.is_empty() {
+        return Err("no parts".into());
+    }
+    let mut loaded: Vec<LoadedMesh> = Vec::new();
+    let mut errs: Vec<String> = Vec::new();
+    for e in parts {
+        match load(buf, e) {
+            Ok(l) => loaded.push(l),
+            // A part that fails is skipped, not fatal: a character with a missing hat is still worth
+            // looking at, and the status line reports what was dropped.
+            Err(err) => errs.push(format!("{}: {err}", e.name)),
+        }
+    }
+    if loaded.is_empty() {
+        return Err(errs.join("; "));
+    }
+
+    // ---- one UNION skeleton, keyed by bone name-hash ----
+    //
+    // No single part holds every bone: each ships a PRUNED rig with only what it needs, so the
+    // richest part is still missing others' bones. Picking it and hoping meant vertices whose bone
+    // was absent had to be pinned to the root (hundreds of them), and the same character assembled
+    // differently depending on which part happened to win. So take the richest part as the SPINE —
+    // it has the deepest correct hierarchy — then graft in every bone the other parts know about.
+    //
+    // A grafted bone keeps its parent by HASH; if that parent is itself unknown it attaches to the
+    // root, which is the honest fallback (a bone with nowhere to hang belongs at the origin).
+    let canon = (0..loaded.len()).max_by_key(|i| loaded[*i].bones.len()).unwrap();
+    let mut bones = loaded[canon].bones.clone();
+    let mut hashes = loaded[canon].bone_hashes.clone();
+    let mut index_of: std::collections::HashMap<u32, u16> =
+        hashes.iter().enumerate().map(|(i, h)| (*h, i as u16)).collect();
+
+    // Pass 1 — append every unknown bone, remembering its parent's HASH (the index is meaningless
+    // here and the parent may itself still be ungrafted).
+    let mut want_parent: std::collections::HashMap<u16, u32> = Default::default();
+    let mut grafted = 0usize;
+    for l in &loaded {
+        for (bi, h) in l.bone_hashes.iter().enumerate() {
+            if index_of.contains_key(h) {
+                continue;
+            }
+            let Some(src) = l.bones.get(bi) else { continue };
+            let idx = bones.len() as u16;
+            if src.parent >= 0 {
+                if let Some(ph) = l.bone_hashes.get(src.parent as usize) {
+                    want_parent.insert(idx, *ph);
+                }
+            }
+            let mut b = src.clone();
+            b.parent = -1; // provisional; resolved below
+            bones.push(b);
+            hashes.push(*h);
+            index_of.insert(*h, idx);
+            grafted += 1;
+        }
+    }
+    // Pass 2 — now that every bone exists, hook each graft to its real parent.
+    for (idx, ph) in &want_parent {
+        bones[*idx as usize].parent = index_of.get(ph).map(|i| *i as i32).unwrap_or(0);
+    }
+
+    // ---- correct the bind pose from the pooled ground truth ----
+    let mut truth: std::collections::HashMap<u32, [f32; 16]> = Default::default();
+    for l in &loaded {
+        for (h, m) in &l.stored_ibm {
+            truth.entry(*h).or_insert(*m);
+        }
+    }
+    // Correcting the bind is BOTH halves or neither. `jointMatrix = world · inv_bind`, so swapping
+    // in a true inv_bind while `world` still comes from the bad chain makes the two disagree and the
+    // mesh deforms AT BIND POSE — worse than leaving both consistently wrong. So: rebuild each
+    // bone's WORLD from the truth, then re-derive its local TRS and inv_bind from that world, and
+    // the hierarchy reproduces the real bind pose.
+    let rm_to_mat = |rm: &[f32; 16]| {
+        let mut cm = [0f32; 16];
+        for c in 0..4 {
+            for r in 0..4 {
+                cm[c * 4 + r] = rm[r * 4 + c];
+            }
+        }
+        glam::Mat4::from_cols_array(&cm)
+    };
+    let mat_to_rm = |m: glam::Mat4| {
+        let cm = m.to_cols_array();
+        let mut rm = [0f32; 16];
+        for c in 0..4 {
+            for r in 0..4 {
+                rm[r * 4 + c] = cm[c * 4 + r];
+            }
+        }
+        rm
+    };
+    let local_of = |b: &Bone| {
+        glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::from_array(b.s),
+            glam::Quat::from_xyzw(b.r[0], b.r[1], b.r[2], b.r[3]),
+            glam::Vec3::from_array(b.t),
+        )
+    };
+
+    let n = bones.len();
+    let mut world = vec![glam::Mat4::IDENTITY; n];
+    let mut done = vec![false; n];
+    let mut corrected = 0usize;
+    // A bone with ground truth resolves immediately, whatever its position in the list.
+    for i in 0..n {
+        if let Some(m) = truth.get(&hashes[i]) {
+            world[i] = rm_to_mat(m).inverse();
+            done[i] = true;
+            corrected += 1;
+        }
+    }
+    // The rest chain from their parent. Grafted bones break the parent-before-child ordering the
+    // file guarantees, so iterate to a fixed point rather than assuming one pass suffices.
+    let mut guard = 0;
+    while done.iter().any(|d| !d) && guard <= n {
+        guard += 1;
+        let mut progress = false;
+        for i in 0..n {
+            if done[i] {
+                continue;
+            }
+            let p = bones[i].parent;
+            if p < 0 {
+                world[i] = local_of(&bones[i]);
+                done[i] = true;
+                progress = true;
+            } else if done[p as usize] {
+                world[i] = world[p as usize] * local_of(&bones[i]);
+                done[i] = true;
+                progress = true;
+            }
+        }
+        if !progress {
+            break; // a cycle or dangling parent: leave the remainder at their local
+        }
+    }
+    for i in 0..n {
+        if !done[i] {
+            world[i] = local_of(&bones[i]);
+        }
+    }
+    for i in 0..n {
+        let p = bones[i].parent;
+        let local = if p < 0 {
+            world[i]
+        } else {
+            world[p as usize].inverse() * world[i]
+        };
+        // Keep the TRS for anything that reads it, but hand the renderer the EXACT matrix —
+        // the decomposition is not lossless and the round trip is what deformed the mesh.
+        let (sc, rot, tr) = local.to_scale_rotation_translation();
+        bones[i].t = tr.to_array();
+        bones[i].r = [rot.x, rot.y, rot.z, rot.w];
+        bones[i].s = sc.to_array();
+        bones[i].local_m = Some(mat_to_rm(local));
+        bones[i].inv_bind = Some(mat_to_rm(world[i].inverse()));
+    }
+
+    // ---- merge geometry, re-keying every part's joints onto the canonical rig ----
+    let mut out = crate::formats::Smsh {
+        positions: Vec::new(),
+        normals: Vec::new(),
+        uvs: Vec::new(),
+        joints: Vec::new(),
+        weights: Vec::new(),
+        indices: Vec::new(),
+        prims: Vec::new(),
+    };
+    let mut prim_parent_bone: Vec<u16> = Vec::new();
+    let mut dropped = 0usize;
+
+    let mut part_ranges: Vec<(String, u32, u32)> = Vec::new();
+    for l in &loaded {
+        let base_v = out.positions.len() as u32;
+        let base_i = out.indices.len() as u32;
+        // this part's local bone index -> canonical index, by name hash
+        let map: Vec<Option<u16>> =
+            l.bone_hashes.iter().map(|h| index_of.get(h).copied()).collect();
+
+        out.positions.extend_from_slice(&l.mesh.positions);
+        out.normals.extend_from_slice(&l.mesh.normals);
+        out.uvs.extend_from_slice(&l.mesh.uvs);
+        out.weights.extend_from_slice(&l.mesh.weights);
+        for j4 in &l.mesh.joints {
+            let mut o = [0u16; 4];
+            for k in 0..4 {
+                match map.get(j4[k] as usize).copied().flatten() {
+                    Some(c) => o[k] = c,
+                    // A bone this part uses that the canonical rig lacks: pin to the root rather
+                    // than to a WRONG bone — a vertex that does not move beats one that flies.
+                    None => {
+                        o[k] = 0;
+                        dropped += 1;
+                    }
+                }
+            }
+            out.joints.push(o);
+        }
+        out.indices.extend(l.mesh.indices.iter().map(|i| i + base_v));
+        for (pi, pr) in l.mesh.prims.iter().enumerate() {
+            let mut q = pr.clone();
+            q.index_start += base_i;
+            // the rigid-attachment bone has to travel through the same remap
+            q.parent_bone = l
+                .prim_parent_bone
+                .get(pi)
+                .and_then(|b| map.get(*b as usize).copied().flatten())
+                .unwrap_or(0);
+            prim_parent_bone.push(q.parent_bone);
+            out.prims.push(q);
+        }
+        part_ranges.push((l.name.clone(), base_i, out.indices.len() as u32 - base_i));
+    }
+
+    // The invariant that makes a bind pose correct: world · inv_bind == identity for every bone.
+    // It is what silently held while the chain was wrong-but-self-consistent, and what broke the
+    // moment only half the correction was applied — so assert it rather than trust it.
+    // Check the RENDER PATH, not our own bookkeeping. The renderer never sees `world` — it
+    // recomposes it from the t/r/s we just wrote (`skinning::bind_world`), and that round trip goes
+    // through `to_scale_rotation_translation`, which cannot represent shear and mis-signs mirrored
+    // axes. Validating our own `world` against our own `inv_bind` would pass by construction and
+    // prove nothing.
+    // mirrors skinning::bind_local, so the check exercises what the renderer will actually do
+    let exact_local = |b: &Bone| match &b.local_m {
+        Some(rm) => rm_to_mat(rm),
+        None => local_of(b),
+    };
+    let mut recomposed = vec![glam::Mat4::IDENTITY; n];
+    let mut rdone = vec![false; n];
+    let mut guard2 = 0;
+    while rdone.iter().any(|d| !d) && guard2 <= n {
+        guard2 += 1;
+        let mut prog = false;
+        for i in 0..n {
+            if rdone[i] { continue; }
+            let p = bones[i].parent;
+            if p < 0 {
+                recomposed[i] = exact_local(&bones[i]);
+                rdone[i] = true; prog = true;
+            } else if rdone[p as usize] {
+                recomposed[i] = recomposed[p as usize] * exact_local(&bones[i]);
+                rdone[i] = true; prog = true;
+            }
+        }
+        if !prog { break; }
+    }
+    let mut worst_dev = 0f32;
+    let mut worst_bone = 0usize;
+    for i in 0..n {
+        if let Some(ib) = &bones[i].inv_bind {
+            let m = recomposed[i] * rm_to_mat(ib);
+            let mut d = 0f32;
+            for (a, b) in m.to_cols_array().iter().zip(glam::Mat4::IDENTITY.to_cols_array().iter()) {
+                d = d.max((a - b).abs());
+            }
+            if d > worst_dev { worst_dev = d; worst_bone = i; }
+        }
+    }
+
+    let name = parts[canon].name.clone();
+    eprintln!(
+        "[sab_workshop] assembled {} from {} part(s): {} verts, {} tris, {} bones \
+         ({corrected} bind-corrected from the asset's own matrices{})",
+        name,
+        loaded.len(),
+        out.positions.len(),
+        out.indices.len() / 3,
+        bones.len(),
+        if dropped > 0 { format!(", {dropped} joint refs pinned to root") } else { String::new() }
+    );
+    if grafted > 0 {
+        eprintln!("[sab_workshop]   union skeleton: {grafted} bone(s) grafted from other parts");
+    }
+    if worst_dev > 1e-3 {
+        eprintln!(
+            "[sab_workshop]   WARNING bind pose is not identity: worst |world·invBind - I| = {worst_dev:.4} at bone {worst_bone}              — the TRS round-trip lost the transform; the mesh is deformed before any clip plays"
+        );
+    }
+    for e in &errs {
+        eprintln!("[sab_workshop]   skipped part {e}");
+    }
+    Ok(LoadedMesh { name, mesh: out, bones, prim_parent_bone, bone_hashes: hashes, stored_ibm: truth, part_ranges })
 }

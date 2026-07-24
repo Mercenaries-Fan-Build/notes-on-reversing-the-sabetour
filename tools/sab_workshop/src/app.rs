@@ -105,41 +105,6 @@ pub fn run(cfg: Config) {
         skel.len()
     );
 
-    // --- optional assets: clip catalog + pack (bind pose still works without them) ---
-    let catalog: AnimCatalog = match anim_index::load(&cfg.index) {
-        Ok(c) => {
-            let playable = c.clips.iter().filter(|c| c.playable).count();
-            println!(
-                "[sab_workshop] anim index: {} clips ({} playable on this skeleton), skeleton_bones={}",
-                c.clips.len(), playable, c.skeleton_bones
-            );
-            c
-        }
-        Err(e) => {
-            errors.push(format!("anim index: {e}"));
-            AnimCatalog { clips: Vec::new(), skeleton_bones: skel.len(), num_main_clips: 0 }
-        }
-    };
-    let pack: Option<PackData> = match PackData::load(&cfg.pack) {
-        Ok(p) => {
-            println!("[sab_workshop] pack: {} hkaSplineCompressedAnimation clips", p.scas.len());
-            Some(p)
-        }
-        Err(e) => {
-            errors.push(format!("pack: {e}"));
-            None
-        }
-    };
-
-    // Playable clip rows (index into catalog.clips), pre-filtered to the ones authored on this rig.
-    let playable_rows: Vec<usize> = catalog
-        .clips
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.playable)
-        .map(|(i, _)| i)
-        .collect();
-
     // --- bounding sphere for the camera ---
     let (center, radius) = bounds(&mesh);
 
@@ -175,56 +140,6 @@ pub fn run(cfg: Config) {
     let bind = skinning::bind_pose(&skel);
     renderer.update_joints(&bind);
 
-    // --- textures: resolve the character's DTEX from the megapack (in-app), then assign per submesh:
-    // a saved sidecar (user-authored, via the Materials picker) wins; otherwise auto-seed by body
-    // part. A ~715 MB read → a brief blocking load at startup (run --release). ---
-    println!("[sab_workshop] opening {} …", cfg.megapack);
-    let megapack: Option<pack::Megapack> = match pack::Megapack::open(&cfg.megapack) {
-        Ok(m) => Some(m),
-        Err(e) => {
-            eprintln!("[sab_workshop] megapack unavailable ({e}) — no browsing / textures");
-            errors.push(format!("megapack: {e}"));
-            None
-        }
-    };
-    // Shared palette archive — searched as a texture fallback for props/vehicles.
-    let palettes: Option<pack::Megapack> = pack::Megapack::open(&cfg.palettes).ok();
-    if palettes.is_none() {
-        eprintln!("[sab_workshop] palettes archive unavailable ({}) — prop textures may not resolve", cfg.palettes);
-    }
-    // The browsable model catalog: a header-only sweep, so this is cheap (no inflate).
-    let mesh_list: Vec<meshload::MeshEntry> =
-        megapack.as_ref().map(|m| meshload::list_meshes(m.raw())).unwrap_or_default();
-
-    let mut assets: Vec<resolve::TexAsset> = Vec::new();
-    let mut submesh_tex: Vec<Option<usize>> = vec![None; renderer.submeshes().len()];
-    if let Some(mp) = &megapack {
-        let a = resolve::textures_in(mp, &cfg.char_token);
-        let n = renderer.submeshes().len();
-        let from_sidecar = resolve::load_sidecar(&cfg.mesh, n, &a);
-        let seeded = from_sidecar.is_none();
-        submesh_tex =
-            from_sidecar.unwrap_or_else(|| resolve::autoseed(&cfg.mesh, renderer.submeshes(), &a));
-        // Decode only the handful actually bound (see TexAsset: decoding is lazy).
-        for (i, slot) in submesh_tex.iter().enumerate() {
-            if let Some(ai) = slot {
-                match a[*ai].decode() {
-                    Ok(tex) => renderer.set_submesh_texture(i, &tex),
-                    Err(e) => eprintln!("[sab_workshop] decode {}: {e}", a[*ai].name),
-                }
-            }
-        }
-        let applied = submesh_tex.iter().filter(|s| s.is_some()).count();
-        let diffuse = a.iter().filter(|x| x.role == resolve::Role::Diffuse).count();
-        println!(
-            "[sab_workshop] {} models | textures: {} assets ({diffuse} diffuse) from {}; {} {applied}/{n} submeshes",
-            mesh_list.len(),
-            a.len(),
-            cfg.char_token,
-            if seeded { "auto-seeded" } else { "from sidecar," }
-        );
-        assets = a;
-    }
     let mut mesh_stats = (mesh.positions.len(), mesh.indices.len() / 3, skel.len());
     let mut submeshes = renderer.submeshes().to_vec();
     // The clip catalog's track→bone indices are authored against the startup rig; a model with a
@@ -235,6 +150,29 @@ pub fn run(cfg: Config) {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "model".into());
 
+    // --- background asset load ---
+    // The megapacks (~1.1 GB) + Animations.pack + texture resolve are slow; load them OFF the main
+    // thread so the window is interactive immediately (the character shows in bind pose, the editor
+    // pages work at once). Results stream back and are applied in RedrawRequested; wgpu uploads stay
+    // on this thread. The worker gets clones of the config + submeshes it needs.
+    let n_sub = submeshes.len();
+    let mut catalog = AnimCatalog { clips: Vec::new(), skeleton_bones: skel.len(), num_main_clips: 0 };
+    let mut playable_rows: Vec<usize> = Vec::new();
+    let mut pack: Option<PackData> = None;
+    let mut megapack: Option<pack::Megapack> = None;
+    let mut palettes: Option<pack::Megapack> = None;
+    let mut mesh_list: Vec<meshload::MeshEntry> = Vec::new();
+    let mut assets: Vec<resolve::TexAsset> = Vec::new();
+    let mut submesh_tex: Vec<Option<usize>> = vec![None; n_sub];
+    let mut submesh_prov: Vec<resolve::Prov> = vec![resolve::Prov::Unresolved; n_sub];
+    let (bg_tx, bg_rx) = std::sync::mpsc::channel::<BgMsg>();
+    {
+        let cfgw = cfg.clone();
+        let subw = submeshes.clone();
+        std::thread::spawn(move || background_load(cfgw, subw, bg_tx));
+    }
+
+
     // --- interactive state (all locals, captured by the move closure) ---
     let mut camera = OrbitCamera::framing(center, radius);
     let mut show_all = false; // include non-playable clips in the list
@@ -243,11 +181,41 @@ pub fn run(cfg: Config) {
     let mut pending_load: Option<usize> = None; // catalog.clips index requested this frame
     // Materials picker request: (submesh, Some(asset) | None to unassign), applied after the UI runs.
     let mut pending_tex: Option<(usize, Option<usize>)> = None;
+    let mut pending_save = false;
     // Navigator: which category is shown, and a click-to-load request (index into `mesh_list`).
     // Root motion walks the character out of a fixed-camera preview; lock it by default.
     let mut lock_root = true;
     let mut nav_tab = NavTab::Models;
-    let mut pending_model: Option<usize> = None;
+    let mut page = Page::Inspect;
+    // The mod-editor pages (Templates / GameText / Icons). Default file paths derive from the game
+    // dir (two levels up from the megapack, e.g. …/The Saboteur/Global/Dynamic0.megapack).
+    let game_dir = std::path::Path::new(&cfg.megapack)
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| "C:/GOG Games/The Saboteur".into());
+    let mut editor_state = crate::editor::Editor::new(&game_dir);
+    // Model-browser groupings (rule-based + user overrides saved next to the game) and the
+    // right-click "move to group" request applied after each UI pass.
+    let mut groups = crate::models::Groups::load(&game_dir);
+    let mut pending_group: Option<(usize, String)> = None;
+    // True until the ModelList stage streams in — the browser shows a spinner meanwhile.
+    let mut models_loading = true;
+    // The assembled assets (from GameTemplates) the browser lists, and the one selected (whose parts
+    // the inspector shows).
+    let mut browse_assets: Vec<crate::assets::Asset> = Vec::new();
+    let mut sel_asset: Option<usize> = None;
+    // Background texture resolve for a clicked model: a monotonic request id (stale results from a
+    // superseded click are discarded) and the result channel.
+    let mut model_req: u64 = 0;
+    let (mtex_tx, mtex_rx) = std::sync::mpsc::channel::<ModelTex>();
+    let mut sel_submesh: Option<usize> = None;
+    let mut sel_bone: Option<usize> = None;
+    let mut sel_tex: Option<usize> = None;
+    let mut thumbs = Thumbs::default();
+    let mut bone_depth: Vec<usize> = bone_depths(&skel);
+    // Every part of the clicked asset — a character is assembled, not shown one piece at a time.
+    let mut pending_model: Option<Vec<usize>> = None;
     let mut nav_search = String::new();
     // Outcome of the last click-to-load, surfaced in the status bar: (message, is_error).
     let mut load_status: Option<(String, bool)> = None;
@@ -304,6 +272,45 @@ pub fn run(cfg: Config) {
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    // Drain whatever background stages have arrived and paint them (progressive fill).
+                    while let Ok(msg) = bg_rx.try_recv() {
+                        match msg {
+                            BgMsg::Catalog { catalog: c, playable_rows: pr } => {
+                                catalog = c;
+                                playable_rows = pr;
+                            }
+                            BgMsg::ModelList { mesh_list: ml, assets: a } => {
+                                mesh_list = ml;
+                                browse_assets = a;
+                                models_loading = false;
+                            }
+                            BgMsg::Textures { assets: a, submesh_tex: st, submesh_prov: sp, decoded } => {
+                                assets = a;
+                                submesh_tex = st;
+                                submesh_prov = sp;
+                                for (i, tex) in &decoded {
+                                    renderer.set_submesh_texture(*i, tex);
+                                }
+                            }
+                            BgMsg::Packs { megapack: mp, palettes: pal } => {
+                                megapack = mp;
+                                palettes = pal;
+                            }
+                            BgMsg::AnimPack(p) => pack = p,
+                        }
+                    }
+                    // Apply a clicked model's textures once the worker resolves them (newest click wins).
+                    while let Ok(mt) = mtex_rx.try_recv() {
+                        if mt.req == model_req {
+                            assets = mt.assets;
+                            submesh_tex = mt.submesh_tex;
+                            submesh_prov = mt.submesh_prov;
+                            for (i, tex) in &mt.decoded {
+                                renderer.set_submesh_texture(*i, tex);
+                            }
+                        }
+                    }
+
                     // --- advance playback ---
                     let now = Instant::now();
                     let dt = (now - last_frame).as_secs_f32().min(0.1);
@@ -336,28 +343,52 @@ pub fn run(cfg: Config) {
                             ctx, &catalog, &playable_rows, &mut show_all,
                             &current, &mut playback, &mut pending_load, &mut renderer.show_grid,
                             &mut renderer.show_textures, &mut lock_root, &errors, pack.is_some(), rig_ok,
-                            mesh_stats, &model_name, &load_status,
+                            mesh_stats, &model_name, &load_status, &mut page, &mut thumbs,
                             &mut MatsCtx {
                                 submeshes: &submeshes,
                                 assets: &assets,
                                 submesh_tex: &submesh_tex,
+                                submesh_prov: &submesh_prov,
+                                selected: &mut sel_submesh,
                                 pending_tex: &mut pending_tex,
+                                pending_save: &mut pending_save,
                             },
                             &mut NavCtx {
                                 tab: &mut nav_tab,
                                 search: &mut nav_search,
-                                models: &mesh_list,
+                                browse_assets: &browse_assets,
+                                sel_asset: &mut sel_asset,
                                 assets: &assets,
                                 pending_model: &mut pending_model,
                                 current_model: &model_name,
+                                bones: &skel,
+                                bone_depth: &bone_depth,
+                                selected_bone: &mut sel_bone,
+                                selected_tex: &mut sel_tex,
+                                groups: &groups,
+                                pending_group: &mut pending_group,
+                                models_loading,
                             },
+                            &mut editor_state,
                         );
                     });
 
+                    // --- act on a right-click "move to group" (persists the override) ---
+                    if let Some((ai, cat)) = pending_group.take() {
+                        if let Some(a) = browse_assets.get(ai) {
+                            groups.set(&a.name, &cat, a.category);
+                        }
+                    }
+
                     // --- act on a navigator model click: swap mesh + rig + textures + camera ---
-                    if let Some(mi) = pending_model.take() {
-                        if let (Some(mp), Some(entry)) = (&megapack, mesh_list.get(mi)) {
-                            match meshload::load(mp.raw(), entry) {
+                    // Don't consume the click until the megapack has streamed in (staged load), else a
+                    // click made while the model list is up but the pack isn't yet would be dropped.
+                    if megapack.is_some() {
+                    if let Some(mis) = pending_model.take() {
+                        let picked: Vec<meshload::MeshEntry> =
+                            mis.iter().filter_map(|i| mesh_list.get(*i).cloned()).collect();
+                        if let (Some(mp), false) = (&megapack, picked.is_empty()) {
+                            match meshload::assemble(mp.raw(), &picked) {
                                 Ok(lm) => {
                                     let nbones = lm.bones.len();
                                     renderer.set_mesh(&lm.mesh, nbones);
@@ -366,25 +397,48 @@ pub fn run(cfg: Config) {
                                     submeshes = renderer.submeshes().to_vec();
                                     mesh_stats =
                                         (lm.mesh.positions.len(), lm.mesh.indices.len() / 3, nbones);
-                                    // Its own bundle first, then a name-token sweep of the pack.
-                                    let bundle = mp
-                                        .entry_containing(entry.file_off)
-                                        .map(|e| mp.slice(&e).to_vec())
-                                        .unwrap_or_default();
-                                    let mut packs: Vec<&pack::Megapack> = vec![mp];
-                                    if let Some(pal) = &palettes {
-                                        packs.push(pal);
-                                    }
-                                    assets = resolve::texture_pool_for(&packs, &lm.name, &bundle);
-                                    submesh_tex =
-                                        resolve::autoseed_generic(submeshes.len(), &assets);
-                                    for (i, slot) in submesh_tex.iter().enumerate() {
-                                        if let Some(ai) = slot {
-                                            if let Ok(t) = assets[*ai].decode() {
-                                                renderer.set_submesh_texture(i, &t);
+                                    // The model shows untextured immediately; its texture resolve (a
+                                    // token scan that can touch the whole pack for a character) runs on
+                                    // a WORKER so this click never freezes the UI. Results stream back
+                                    // and are applied in the mtex drain below.
+                                    assets = Vec::new();
+                                    submesh_tex = vec![None; submeshes.len()];
+                                    submesh_prov = vec![resolve::Prov::Unresolved; submeshes.len()];
+                                    model_req = model_req.wrapping_add(1);
+                                    {
+                                        let cfgw = cfg.clone();
+                                        // every part, with the slice of the index buffer it owns
+                                        let pinfo: Vec<(String, usize, u32, u32)> = lm
+                                            .part_ranges
+                                            .iter()
+                                            .map(|(n, i0, ilen)| {
+                                                let off = picked
+                                                    .iter()
+                                                    .find(|e| &e.name == n)
+                                                    .map(|e| e.file_off)
+                                                    .unwrap_or(0);
+                                                (n.clone(), off, *i0, *ilen)
+                                            })
+                                            .collect();
+                                        let starts: Vec<u32> =
+                                            submeshes.iter().map(|s| s.index_start).collect();
+                                        // materials[0] per submesh — the drawcall material hash WSAO
+                                        // keys on; None where a range carries no material.
+                                        let mats: Vec<Option<u32>> =
+                                            submeshes.iter().map(|s| s.materials.first().copied()).collect();
+                                        let req = model_req;
+                                        let tx = mtex_tx.clone();
+                                        std::thread::spawn(move || {
+                                            if let Some(mt) = resolve_model_textures(cfgw, pinfo, starts, mats, req) {
+                                                let _ = tx.send(mt);
                                             }
-                                        }
+                                        });
                                     }
+                                    bone_depth = bone_depths(&skel);
+                                    sel_submesh = None;
+                                    sel_bone = None;
+                                    sel_tex = None;
+                                    thumbs.clear();
                                     let (c, r) = bounds(&lm.mesh);
                                     camera = OrbitCamera::framing(c, r);
                                     // The clip catalog is authored against the startup rig.
@@ -413,12 +467,13 @@ pub fn run(cfg: Config) {
                                     // Most pack entries are STATIC props; the MESH reader we ported
                                     // from sab_mesh only handles skinned meshes, so say so in the UI
                                     // rather than appearing to ignore the click.
-                                    eprintln!("[sab_workshop] load {}: {e}", entry.name);
-                                    load_status = Some((format!("{}: {e}", entry.name), true));
+                                    eprintln!("[sab_workshop] assemble: {e}");
+                                    load_status = Some((format!("assemble: {e}"), true));
                                 }
                             }
                         }
                     }
+                    } // end `if megapack.is_some()`
 
                     // --- act on a Materials picker change: rebind + persist the sidecar ---
                     if let Some((i, ai)) = pending_tex.take() {
@@ -430,13 +485,34 @@ pub fn run(cfg: Config) {
                             None => renderer.clear_submesh_texture(i),
                         }
                         submesh_tex[i] = ai;
-                        match resolve::save_sidecar(&cfg.mesh, &submesh_tex, &assets) {
+                        // A pick is a decision, so it stops being a guess — and unpicking returns
+                        // the submesh to occupied rather than to "seeded".
+                        submesh_prov[i] =
+                            if ai.is_some() { resolve::Prov::Bound } else { resolve::Prov::Unresolved };
+                        match resolve::save_sidecar(&cfg.mesh, &submesh_tex, &submesh_prov, &assets) {
                             Ok(()) => println!(
                                 "[sab_workshop] submesh {i} -> {} (saved {})",
                                 ai.map(|x| assets[x].name.as_str()).unwrap_or("(none)"),
                                 resolve::sidecar_path(&cfg.mesh)
                             ),
                             Err(e) => eprintln!("[sab_workshop] sidecar save failed: {e}"),
+                        }
+                    }
+
+                    // --- act on an explicit sidecar write (the stamp) ---
+                    if std::mem::take(&mut pending_save) {
+                        match resolve::save_sidecar(&cfg.mesh, &submesh_tex, &submesh_prov, &assets) {
+                            Ok(()) => {
+                                let n = submesh_prov.iter().filter(|p| **p == resolve::Prov::Bound).count();
+                                load_status = Some((
+                                    format!("wrote {} ({n} bound)", resolve::sidecar_path(&cfg.mesh)),
+                                    false,
+                                ));
+                            }
+                            Err(e) => {
+                                eprintln!("[sab_workshop] sidecar save failed: {e}");
+                                load_status = Some((format!("sidecar: {e}"), true));
+                            }
                         }
                     }
 
@@ -458,6 +534,8 @@ pub fn run(cfg: Config) {
                         }
                     }
 
+                    // The editor pages own the whole window with opaque panels; skip the scene pass.
+                    renderer.draw_scene = page.editor().is_none();
                     match renderer.render(&mut gui) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
@@ -472,6 +550,346 @@ pub fn run(cfg: Config) {
     if let Err(e) = result {
         eprintln!("[sab_workshop] event loop error: {e}");
     }
+}
+
+/// One stage of the background load, delivered to the main thread as soon as it is ready so the UI
+/// fills in progressively instead of waiting for everything. All payloads are owned (Send). `decoded`
+/// textures are uploaded on the main thread (wgpu is main-thread only).
+enum BgMsg {
+    /// The clip catalog (anim_bone_map.json) — the clip list. Cheap; arrives first.
+    Catalog { catalog: AnimCatalog, playable_rows: Vec<usize> },
+    /// The flat mesh list (for the loader) + the assembled assets built from GameTemplates (what the
+    /// browser shows). Arrives after the mmap chain-walk + the GameTemplates parse.
+    ModelList { mesh_list: Vec<meshload::MeshEntry>, assets: Vec<crate::assets::Asset> },
+    /// The current character's resolved textures + which submesh each is on + decoded pixels.
+    Textures {
+        assets: Vec<resolve::TexAsset>,
+        submesh_tex: Vec<Option<usize>>,
+        submesh_prov: Vec<resolve::Prov>,
+        decoded: Vec<(usize, crate::dtex::CpuTexture)>,
+    },
+    /// The mmapped megapacks themselves — hands click-to-load model switching to the main thread.
+    Packs { megapack: Option<pack::Megapack>, palettes: Option<pack::Megapack> },
+    /// Animations.pack (187 MB) — needed only to PLAY a clip, so it is loaded last.
+    AnimPack(Option<PackData>),
+}
+
+/// Textures resolved (on a worker) for a model the user clicked in the browser. `req` tags the click
+/// so a stale result from a superseded click is discarded on the main thread.
+struct ModelTex {
+    req: u64,
+    assets: Vec<resolve::TexAsset>,
+    submesh_tex: Vec<Option<usize>>,
+    submesh_prov: Vec<resolve::Prov>,
+    decoded: Vec<(usize, crate::dtex::CpuTexture)>,
+}
+
+/// Resolve + BC-decode a clicked model's textures OFF the main thread. Reopens the megapacks (mmap is
+/// cheap) and binds each submesh the engine's way — `materials[0]` → WSMA record → WSTX slot 0
+/// (colour) → DTEX-by-name-hash — via `France.materials`. The name-suffix heuristic is kept only as a
+/// fallback for when WSAO can't answer (table missing, or a submesh with no material). Returns `None`
+/// if the pack can't be opened.
+fn resolve_model_textures(
+    cfg: Config,
+    parts: Vec<(String, usize, u32, u32)>, // (part name, file_off, index_start, index_count)
+    submesh_starts: Vec<u32>,              // each submesh's index_start, to attribute it to a part
+    submesh_mats: Vec<Option<u32>>,        // materials[0] per submesh — the WSAO material hash
+    req: u64,
+) -> Option<ModelTex> {
+    use std::collections::{HashMap, HashSet};
+
+    let mp = pack::Megapack::open(&cfg.megapack).ok()?;
+    let palettes = pack::Megapack::open(&cfg.palettes).ok();
+    let mut packs: Vec<&pack::Megapack> = vec![&mp];
+    if let Some(p) = &palettes {
+        packs.push(p);
+    }
+
+    let nsub = submesh_starts.len();
+    let mut assets: Vec<resolve::TexAsset> = Vec::new();
+    let mut submesh_tex: Vec<Option<usize>> = vec![None; nsub];
+    let mut submesh_prov: Vec<resolve::Prov> = vec![resolve::Prov::Unresolved; nsub];
+
+    // ── primary: WSAO, the engine's own material→texture binding ──
+    // France.materials is a loose file at the GAME ROOT (parent of the "Global" dir the megapack is
+    // in). `cfg.wsao` overrides the derived path when set.
+    let wsao_path = cfg.wsao.clone().or_else(|| {
+        std::path::Path::new(&cfg.megapack)
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|root| root.join("France.materials").to_string_lossy().replace('\\', "/"))
+    });
+    let wsao = wsao_path.as_deref().and_then(|p| crate::wsao::Wsao::open(p).ok());
+
+    if let Some(w) = &wsao {
+        // 1. material hash → colour texture name-hash (WSTX slot 0), per submesh. A `numTex == 0`
+        //    material is a container range with no textures — `textures()` yields an empty slice, so
+        //    `.first()` is None and that submesh is left for the fallback (or unresolved).
+        let want: Vec<Option<u32>> = submesh_mats
+            .iter()
+            .map(|m| m.and_then(|mat| w.textures(mat).and_then(|t| t.first().copied())))
+            .collect();
+        let mut needed: HashSet<u32> = want.iter().flatten().copied().collect();
+
+        // 2. resolve those name-hashes to DTEX records: the parts' OWN bundles first (a character's
+        //    skins usually co-locate), then a whole-pack sweep for the ~23% that cross bundles / the
+        //    props that live in Palettes0.
+        let mut found: HashMap<u32, resolve::TexAsset> = HashMap::new();
+        if !needed.is_empty() {
+            let own: Vec<Vec<u8>> = parts
+                .iter()
+                .filter_map(|(_, off, _, _)| mp.entry_containing(*off).map(|e| mp.slice(&e).to_vec()))
+                .collect();
+            let own_ref: Vec<&[u8]> = own.iter().map(|v| v.as_slice()).collect();
+            resolve::take_hashes_from_slices(&own_ref, &mut needed, &mut found);
+            if !needed.is_empty() {
+                resolve::take_hashes_from_packs(&packs, &mut needed, &mut found);
+            }
+        }
+
+        // 3. bind each submesh to its colour record. This is the game's decision, so provenance is
+        //    Bound, not Seeded.
+        let mut idx: HashMap<u32, usize> = HashMap::new();
+        for (h, a) in found {
+            let ai = assets.len();
+            idx.insert(h, ai);
+            assets.push(a);
+        }
+        for (k, wh) in want.iter().enumerate() {
+            if let Some(ai) = wh.and_then(|h| idx.get(&h).copied()) {
+                submesh_tex[k] = Some(ai);
+                submesh_prov[k] = resolve::Prov::Bound;
+            }
+        }
+    }
+
+    // ── fallback: name-suffix heuristic, only for submeshes WSAO left unbound ──
+    // Fires when France.materials can't answer (absent, or a submesh with no material / a material
+    // not in the table). Resolves per part and seeds only the still-unbound submeshes of that part.
+    if submesh_tex.iter().any(|t| t.is_none()) {
+        for (name, file_off, i0, ilen) in &parts {
+            let mine: Vec<usize> = (0..nsub)
+                .filter(|k| {
+                    submesh_tex[*k].is_none()
+                        && submesh_starts[*k] >= *i0
+                        && submesh_starts[*k] < *i0 + *ilen
+                })
+                .collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let bundle =
+                mp.entry_containing(*file_off).map(|e| mp.slice(&e).to_vec()).unwrap_or_default();
+            let pool = resolve::texture_pool_for(&packs, &resolve::outfit_token(name), &bundle);
+            if pool.is_empty() {
+                continue;
+            }
+            let seeded = resolve::autoseed_for_part(name, mine.len(), &pool);
+            let base = assets.len();
+            assets.extend(pool);
+            for (slot, k) in mine.iter().enumerate() {
+                if let Some(ai) = seeded.get(slot).copied().flatten() {
+                    submesh_tex[*k] = Some(base + ai);
+                    submesh_prov[*k] = resolve::Prov::Seeded;
+                }
+            }
+        }
+    }
+
+    let mut decoded = Vec::new();
+    for (i, slot) in submesh_tex.iter().enumerate() {
+        if let Some(ai) = slot {
+            if let Ok(t) = assets[*ai].decode() {
+                decoded.push((i, t));
+            }
+        }
+    }
+    Some(ModelTex { req, assets, submesh_tex, submesh_prov, decoded })
+}
+
+/// The slow boot work, on a worker thread, streamed in stages via `tx`. Each `send` lets the main
+/// thread paint that section immediately. The megapacks are mmapped (instant open); the model list is
+/// enumerated from the index (only sub-pack header windows are touched), so it appears fast.
+fn background_load(cfg: Config, submeshes: Vec<SubMesh>, tx: std::sync::mpsc::Sender<BgMsg>) {
+    let n = submeshes.len();
+
+    // 1. clip catalog — first thing to fill.
+    let catalog = match anim_index::load(&cfg.index) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[sab_workshop] anim index: {e}");
+            AnimCatalog { clips: Vec::new(), skeleton_bones: 0, num_main_clips: 0 }
+        }
+    };
+    let playable_rows: Vec<usize> =
+        catalog.clips.iter().enumerate().filter(|(_, c)| c.playable).map(|(i, _)| i).collect();
+    let _ = tx.send(BgMsg::Catalog { catalog, playable_rows });
+
+    // 2. megapack (mmap = instant) + the model list (MSHA chain-walk — only headers).
+    let megapack = match pack::Megapack::open(&cfg.megapack) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("[sab_workshop] megapack unavailable ({e}) — no browsing / textures");
+            None
+        }
+    };
+    let mesh_list = megapack.as_ref().map(meshload::list_meshes).unwrap_or_default();
+    // Assemble assets from the game's own GameTemplates (FxHumanBodySetup / Weapon / CAR / Prop …).
+    let game_dir = std::path::Path::new(&cfg.megapack)
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let assets = match crate::assets::load_gametemplates(&game_dir) {
+        Some(gt) => crate::assets::build(&gt, &mesh_list),
+        None => {
+            eprintln!("[sab_workshop] GameTemplates unavailable — browser falls back to raw meshes");
+            crate::assets::build_flat(&mesh_list)
+        }
+    };
+    let _ = tx.send(BgMsg::ModelList { mesh_list, assets });
+
+    // 3. hand the megapacks to the main thread NOW — click-to-load must work the moment the list
+    // shows, not after the slow texture scan below. The mmaps are cheap to open a second time, so the
+    // worker keeps `megapack` (for the texture resolve) and the main thread gets its own.
+    let _ = tx.send(BgMsg::Packs {
+        megapack: pack::Megapack::open(&cfg.megapack).ok(),
+        palettes: pack::Megapack::open(&cfg.palettes).ok(),
+    });
+
+    // 4. the character's textures (token scan → matched bundle → BC-decode the bound ones) — slow.
+    let mut assets: Vec<resolve::TexAsset> = Vec::new();
+    let mut submesh_tex: Vec<Option<usize>> = vec![None; n];
+    let mut submesh_prov: Vec<resolve::Prov> = vec![resolve::Prov::Unresolved; n];
+    let mut decoded: Vec<(usize, crate::dtex::CpuTexture)> = Vec::new();
+    if let Some(mp) = &megapack {
+        let a = resolve::textures_in(mp, &cfg.char_token);
+        (submesh_tex, submesh_prov) = resolve::load_sidecar(&cfg.mesh, n, &a).unwrap_or_else(|| {
+            let assign = resolve::autoseed(&cfg.mesh, &submeshes, &a);
+            let prov = resolve::seed_prov(&assign);
+            (assign, prov)
+        });
+        for (i, slot) in submesh_tex.iter().enumerate() {
+            if let Some(ai) = slot {
+                match a[*ai].decode() {
+                    Ok(tex) => decoded.push((i, tex)),
+                    Err(e) => eprintln!("[sab_workshop] decode {}: {e}", a[*ai].name),
+                }
+            }
+        }
+        assets = a;
+    }
+    // Engine-faithful WSAO override (Mattias port): material hash → diffuse texture hash → loose DTEX.
+    if let (Some(wp), Some(dd)) = (&cfg.wsao, &cfg.dtex_dir) {
+        if let Ok(w) = crate::wsao::Wsao::open(wp) {
+            for (i, sm) in submeshes.iter().enumerate() {
+                let Some(&mat) = sm.materials.first() else { continue };
+                let Some(texes) = w.textures(mat) else { continue };
+                let Some(&diffuse) = texes.first() else { continue };
+                if let Ok(tex) = crate::wsao::load_loose_dtex(dd, diffuse) {
+                    decoded.push((i, tex));
+                }
+            }
+        }
+    }
+    let _ = tx.send(BgMsg::Textures { assets, submesh_tex, submesh_prov, decoded });
+    drop(megapack); // the main thread has its own copy (sent in stage 3)
+
+    // 5. Animations.pack (187 MB) — needed only to PLAY a clip, so it is loaded last.
+    let pack = PackData::load(&cfg.pack).map_err(|e| eprintln!("[sab_workshop] pack: {e}")).ok();
+    let _ = tx.send(BgMsg::AnimPack(pack));
+}
+
+/// Headless verification of the WSAO texture-binding path (no window). For every assembled asset
+/// whose name contains `filter` (case-insensitive), assemble its parts and run the EXACT click-path
+/// resolver `resolve_model_textures`, then print each submesh's material hash → bound texture (or
+/// "unresolved") with its provenance, and a per-asset + overall coverage tally. This is how we prove
+/// non-base outfits (SeanRacing …) bind through France.materials rather than the name heuristic.
+pub fn texcheck(cfg: Config, filter: &str) -> i32 {
+    let mp = match pack::Megapack::open(&cfg.megapack) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("texcheck: megapack: {e}");
+            return 1;
+        }
+    };
+    let mesh_list = meshload::list_meshes(&mp);
+    let game_dir = std::path::Path::new(&cfg.megapack)
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let assets = match crate::assets::load_gametemplates(&game_dir) {
+        Some(gt) => crate::assets::build(&gt, &mesh_list),
+        None => crate::assets::build_flat(&mesh_list),
+    };
+
+    let filt = filter.to_ascii_lowercase();
+    let (mut n_assets, mut tot_sub, mut tot_bound, mut tot_wsao) = (0usize, 0usize, 0usize, 0usize);
+    for a in &assets {
+        if !filt.is_empty() && !a.name.to_ascii_lowercase().contains(&filt) {
+            continue;
+        }
+        let idxs = a.assembly();
+        let picked: Vec<meshload::MeshEntry> =
+            idxs.iter().filter_map(|i| mesh_list.get(*i).cloned()).collect();
+        if picked.is_empty() {
+            continue;
+        }
+        let lm = match meshload::assemble(mp.raw(), &picked) {
+            Ok(l) => l,
+            Err(_) => continue, // static/unskinned — the loader only handles skinned meshes
+        };
+        let submeshes =
+            formats::submesh_cover(&lm.mesh.prims, lm.mesh.indices.len() as u32);
+        let pinfo: Vec<(String, usize, u32, u32)> = lm
+            .part_ranges
+            .iter()
+            .map(|(nm, i0, ilen)| {
+                let off = picked.iter().find(|e| &e.name == nm).map(|e| e.file_off).unwrap_or(0);
+                (nm.clone(), off, *i0, *ilen)
+            })
+            .collect();
+        let starts: Vec<u32> = submeshes.iter().map(|s| s.index_start).collect();
+        let mats: Vec<Option<u32>> = submeshes.iter().map(|s| s.materials.first().copied()).collect();
+        let Some(mt) = resolve_model_textures(cfg.clone(), pinfo, starts, mats.clone(), 0) else {
+            continue;
+        };
+
+        n_assets += 1;
+        let bound = mt.submesh_tex.iter().filter(|t| t.is_some()).count();
+        let wsao = mt.submesh_prov.iter().filter(|p| **p == resolve::Prov::Bound).count();
+        tot_sub += submeshes.len();
+        tot_bound += bound;
+        tot_wsao += wsao;
+        println!(
+            "\n{}  ({} parts, {} submeshes)  bound {}/{}  [WSAO {}, seeded {}]",
+            a.name,
+            picked.len(),
+            submeshes.len(),
+            bound,
+            submeshes.len(),
+            wsao,
+            bound - wsao,
+        );
+        for (i, sm) in submeshes.iter().enumerate() {
+            let mat = mats[i].map(|m| format!("{m:08X}")).unwrap_or_else(|| "--------".into());
+            let (tex, prov) = match mt.submesh_tex[i] {
+                Some(ai) => (mt.assets[ai].name.as_str(), match mt.submesh_prov[i] {
+                    resolve::Prov::Bound => "WSAO",
+                    resolve::Prov::Seeded => "seed",
+                    resolve::Prov::Unresolved => "??",
+                }),
+                None => ("(unresolved)", "--"),
+            };
+            println!("  [{i:2}] mat {mat}  {prov:>4}  {tex}");
+        }
+    }
+    println!(
+        "\ntexcheck '{filter}': {n_assets} assets, {tot_bound}/{tot_sub} submeshes bound ({tot_wsao} via WSAO, {} via heuristic)",
+        tot_bound - tot_wsao
+    );
+    0
 }
 
 /// Headless self-test: load assets, decode the N-th playable clip, run skinning over a few
@@ -566,15 +984,83 @@ pub fn selftest(cfg: Config, n: usize) -> i32 {
             let bind_len = (bt[0] * bt[0] + bt[1] * bt[1] + bt[2] * bt[2]).sqrt();
             if q.t[0] == 0.0 && q.t[1] == 0.0 && q.t[2] == 0.0 && bind_len > 1e-4 {
                 nonzero_bind += 1;
+                // NAME it. A bone that takes (0,0,0) where its bind translation is non-zero
+                // collapses onto its parent's origin, and drags its whole subtree with it — which
+                // is what the long spikes in the viewport are.
+                println!(
+                    "selftest:   COLLAPSE track {k} -> bone {bone} '{}' — decoded t=(0,0,0) but bind t=({:.3},{:.3},{:.3}), |bind|={bind_len:.3}m",
+                    skel[bone as usize].name, bt[0], bt[1], bt[2]
+                );
             }
         }
         println!(
             "selftest: {} of those zero-translation tracks drive a bone whose BIND translation is non-zero",
             nonzero_bind
         );
+
+        // WHICH bones actually fly?
+        //
+        // NOT by jointMatrix translation — that is the bind→posed transform, not a position, and
+        // for a bone 1.7 m off the floor an honest rotation puts metres in it. The real question is
+        // where the bone's ORIGIN ends up, and since jointMatrix = world · inv_bind (with
+        // inv_bind = bind_world⁻¹), `jointMatrix · bind_world` recovers the posed world matrix.
+        {
+            let mid = clip.duration * 0.5;
+            let pose_m = clip.anim.sample_at(pk.blob(), mid);
+            let posed_m = skinning::posed(&skel, &pose_m, &clip.track_to_bone, true);
+            let bind_w = skinning::bind_world(&skel);
+            let mut worst: Vec<(f32, usize)> = posed_m
+                .iter()
+                .zip(&bind_w)
+                .enumerate()
+                .map(|(i, (jm, bw))| {
+                    let posed_pos = (*jm * *bw).w_axis.truncate();
+                    let bind_pos = bw.w_axis.truncate();
+                    ((posed_pos - bind_pos).length(), i)
+                })
+                .collect();
+            worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            // How many vertices does each bone actually carry? A bone that flies but has no skin
+            // weighted to it is invisible; one with thousands of verts is the thing on screen.
+            let mut vert_count = vec![0usize; skel.len()];
+            for (j4, w4) in mesh.joints.iter().zip(&mesh.weights) {
+                for k in 0..4 {
+                    if w4[k] > 0.5 {
+                        let b = j4[k] as usize;
+                        if b < vert_count.len() {
+                            vert_count[b] += 1;
+                        }
+                    }
+                }
+            }
+            let flying: usize = worst
+                .iter()
+                .filter(|(d, _)| *d > 0.5)
+                .map(|(_, i)| vert_count[*i])
+                .sum();
+            println!(
+                "selftest: vertices dominantly weighted to a bone that travels >0.5 m: {flying} of {}",
+                mesh.positions.len()
+            );
+            println!("selftest: worst BONE-ORIGIN travel vs bind at t={mid:.2}s (root locked):");
+            for (d, i) in worst.iter().take(10) {
+                let _ = vert_count[*i];
+                let tracked = clip.track_to_bone.iter().position(|b| *b == *i as i32);
+                println!(
+                    "selftest:   {d:7.3} m  bone {i:3} '{}' parent={} verts={} {}",
+                    skel[*i].name,
+                    skel[*i].parent,
+                    vert_count[*i],
+                    match tracked {
+                        Some(t) => format!("(track {t})"),
+                        None => "(NO TRACK — holds bind local)".into(),
+                    }
+                );
+            }
+        }
         // Compare decoded values against the rig's bind locals: at t=0 a sane clip should sit near
         // the bind pose in scale/order-of-magnitude, and quats must be unit.
-        println!("selftest: track -> bone | decoded t | bind t | |q| | decoded s");
+        println!("selftest: track -> bone | decoded t | bind t | decoded q (xyzw) | euler° | decoded s");
         for (k, q) in pose0.iter().enumerate().take(8) {
             let bone = clip.track_to_bone.get(k).copied().unwrap_or(-1);
             let (bt, nm) = if bone >= 0 && (bone as usize) < skel.len() {
@@ -582,10 +1068,17 @@ pub fn selftest(cfg: Config, n: usize) -> i32 {
             } else {
                 ([0.0; 3], "(unbound)".into())
             };
-            let qn = (q.r[0] * q.r[0] + q.r[1] * q.r[1] + q.r[2] * q.r[2] + q.r[3] * q.r[3]).sqrt();
+            // The quaternion COMPONENTS, plus the same rotation as XYZ Euler degrees. A
+            // coordinate-space conversion hiding in a track shows up here as a clean ±90° about a
+            // single axis, which |q| (always 1.0 for any rotation) can never reveal.
+            let quat = glam::Quat::from_xyzw(q.r[0], q.r[1], q.r[2], q.r[3]).normalize();
+            let (ex, ey, ez) = quat.to_euler(glam::EulerRot::XYZ);
             println!(
-                "  {k:2} -> {bone:3} {nm:22} t=({:8.3},{:8.3},{:8.3}) bind=({:8.3},{:8.3},{:8.3}) |q|={qn:.3} s=({:.2},{:.2},{:.2})",
-                q.t[0], q.t[1], q.t[2], bt[0], bt[1], bt[2], q.s[0], q.s[1], q.s[2]
+                "  {k:2} -> {bone:3} {nm:22} t=({:8.3},{:8.3},{:8.3}) bind=({:8.3},{:8.3},{:8.3}) q=({:6.3},{:6.3},{:6.3},{:6.3}) euler=({:7.1},{:7.1},{:7.1}) s=({:.2},{:.2},{:.2})",
+                q.t[0], q.t[1], q.t[2], bt[0], bt[1], bt[2],
+                q.r[0], q.r[1], q.r[2], q.r[3],
+                ex.to_degrees(), ey.to_degrees(), ez.to_degrees(),
+                q.s[0], q.s[1], q.s[2]
             );
         }
         // Magnitude sweep: how far do decoded translations stray from bind across all tracks?
@@ -631,6 +1124,30 @@ pub fn selftest(cfg: Config, n: usize) -> i32 {
     // Texture pipeline (no GPU): submesh cover + in-app resolve + auto-seed.
     let cover = formats::submesh_cover(&mesh.prims, mesh.indices.len() as u32);
     println!("selftest: submesh cover = {} draw ranges", cover.len());
+    // Model list via the fast MSHA chain-walk, then assemble assets from GameTemplates + count them.
+    if let Ok(mp) = pack::Megapack::open(&cfg.megapack) {
+        let list = meshload::list_meshes(&mp);
+        let game_dir = std::path::Path::new(&cfg.megapack)
+            .parent().and_then(|p| p.parent())
+            .map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        let assets = match crate::assets::load_gametemplates(&game_dir) {
+            Some(gt) => crate::assets::build(&gt, &list),
+            None => { println!("selftest: GameTemplates not found — flat fallback"); crate::assets::build_flat(&list) }
+        };
+        let mut by_cat: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for a in &assets {
+            *by_cat.entry(a.category).or_default() += 1;
+        }
+        println!("selftest: {} meshes (chain-walk) -> {} assembled assets (GameTemplates); categories:", list.len(), assets.len());
+        for (c, n) in &by_cat {
+            println!("  {c:12} {n}");
+        }
+        // spot-check the assembled Sean
+        if let Some(a) = assets.iter().find(|a| a.name == "FBS_RS_Sean") {
+            println!("  FBS_RS_Sean parts: {}", a.parts.iter().map(|p| p.label.as_str()).collect::<Vec<_>>().join(", "));
+        }
+    }
+
     match resolve::load_character_textures(&cfg.megapack, &cfg.char_token) {
         Ok(assets) => {
             let diffuse = assets.iter().filter(|a| a.role == resolve::Role::Diffuse).count();
@@ -805,21 +1322,134 @@ fn bounds(mesh: &Smsh) -> (Vec3, f32) {
     (center, radius.max(0.1))
 }
 
-/// Which category the navigator is browsing. The mercs2 workshop's navigator is the asset browser
-/// (every model + texture in the pack); animations are sab's third category.
+/// Contact-sheet thumbnails, decoded on first sight and kept.
+///
+/// The pool runs to a couple of hundred records, so this is deliberately lazy in two ways: a
+/// thumbnail is only decoded when its tile is actually drawn (egui's ScrollArea culls the rest),
+/// and it decodes a small mip rather than the finest one. Opening the Textures page therefore costs
+/// roughly a screenful of tiny BC decodes, not the whole pool.
+///
+/// A record that fails to decode is remembered as a failure (`None`), or we would retry the same
+/// broken record every frame for as long as the page is open.
+#[derive(Default)]
+struct Thumbs {
+    cache: std::collections::HashMap<usize, Option<egui::TextureHandle>>,
+}
+
+impl Thumbs {
+    fn get(
+        &mut self,
+        i: usize,
+        ctx: &egui::Context,
+        assets: &[resolve::TexAsset],
+    ) -> Option<egui::TextureHandle> {
+        if let Some(hit) = self.cache.get(&i) {
+            return hit.clone();
+        }
+        let made = assets.get(i).and_then(|a| match a.decode_preview(96) {
+            Ok(t) => {
+                let img = egui::ColorImage::from_rgba_unmultiplied(
+                    [t.width as usize, t.height as usize],
+                    &t.rgba,
+                );
+                Some(ctx.load_texture(format!("thumb{i}"), img, egui::TextureOptions::LINEAR))
+            }
+            Err(e) => {
+                eprintln!("[sab_workshop] thumb {}: {e}", a.name);
+                None
+            }
+        });
+        self.cache.insert(i, made.clone());
+        made
+    }
+
+    /// Drop everything — the asset pool changed, so every index is stale.
+    fn clear(&mut self) {
+        self.cache.clear();
+    }
+}
+
+/// Depth of each bone in the hierarchy, so the Rig tree can indent by it.
+///
+/// Bones are stored parent-first (a child's `parent` always indexes an earlier bone), so one
+/// forward pass is enough. A bone whose parent index is out of range or self-referential is treated
+/// as a root rather than trusted — a malformed `.skel` should indent oddly, not hang.
+fn bone_depths(skel: &[formats::Bone]) -> Vec<usize> {
+    let mut d = vec![0usize; skel.len()];
+    for i in 0..skel.len() {
+        let p = skel[i].parent;
+        d[i] = if p >= 0 && (p as usize) < i { d[p as usize] + 1 } else { 0 };
+    }
+    d
+}
+
+/// A rail page. Each one exists because its LAYOUT differs, not merely its subject: a contact sheet
+/// is not a list, and a bone tree is not either. Pages that would share a layout share a page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    /// The character/animation viewer — pick a model or clip and look at it (wgpu scene + rig).
+    Inspect,
+    /// Edit GameText.dlg — everything the player reads, in seven languages.
+    Strings,
+    /// Edit GameTemplates.wsd (AULB) — what a thing IS: its property pairs.
+    Objects,
+    /// Browse the texture pool as pictures, and wire one into an object property.
+    Icons,
+}
+
+impl Page {
+    const ALL: [Page; 4] = [Page::Inspect, Page::Strings, Page::Objects, Page::Icons];
+    fn label(self) -> &'static str {
+        match self {
+            Page::Inspect => "inspect",
+            Page::Strings => "strings",
+            Page::Objects => "objects",
+            Page::Icons => "icons",
+        }
+    }
+    fn glyph(self) -> &'static str {
+        match self {
+            Page::Inspect => "◎",
+            Page::Strings => "¶",
+            Page::Objects => "▤",
+            Page::Icons => "▦",
+        }
+    }
+    /// The editor page this maps to, or `None` for Inspect (the wgpu viewer).
+    fn editor(self) -> Option<crate::editor::EdPage> {
+        use crate::editor::EdPage;
+        match self {
+            Page::Inspect => None,
+            Page::Strings => Some(EdPage::Strings),
+            Page::Objects => Some(EdPage::Objects),
+            Page::Icons => Some(EdPage::Icons),
+        }
+    }
+    /// The 1-4 shortcut that selects this page.
+    fn key(self) -> egui::Key {
+        match self {
+            Page::Inspect => egui::Key::Num1,
+            Page::Strings => egui::Key::Num2,
+            Page::Objects => egui::Key::Num3,
+            Page::Icons => egui::Key::Num4,
+        }
+    }
+}
+
+/// Which category the Inspect navigator is browsing. Models and clips share this page because they
+/// share a shape — a filtered list you pick from. (`textures` retired to its own rail page: a
+/// contact sheet is a different layout, which is exactly when a page is warranted.)
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NavTab {
     Models,
-    Textures,
     Animations,
 }
 
 impl NavTab {
-    const ALL: [NavTab; 3] = [NavTab::Models, NavTab::Textures, NavTab::Animations];
+    const ALL: [NavTab; 2] = [NavTab::Models, NavTab::Animations];
     fn label(self) -> &'static str {
         match self {
             NavTab::Models => "models",
-            NavTab::Textures => "textures",
             NavTab::Animations => "anims",
         }
     }
@@ -831,18 +1461,40 @@ struct MatsCtx<'a> {
     submeshes: &'a [SubMesh],
     assets: &'a [resolve::TexAsset],
     submesh_tex: &'a [Option<usize>],
+    /// How each binding was arrived at — bound / seeded / unresolved, parallel to `submesh_tex`.
+    submesh_prov: &'a [resolve::Prov],
+    /// Which submesh the Materials page is working on.
+    selected: &'a mut Option<usize>,
     pending_tex: &'a mut Option<(usize, Option<usize>)>,
+    /// Set by the stamp: re-write the sidecar as it currently stands.
+    pending_save: &'a mut bool,
 }
 
 /// The navigator's borrowed state: the browsable catalogs + the click out-params.
 struct NavCtx<'a> {
     tab: &'a mut NavTab,
     search: &'a mut String,
-    models: &'a [meshload::MeshEntry],
+    /// The assembled assets the browser lists (from GameTemplates).
+    browse_assets: &'a [crate::assets::Asset],
+    /// The selected asset (whose parts the inspector shows).
+    sel_asset: &'a mut Option<usize>,
     assets: &'a [resolve::TexAsset],
-    pending_model: &'a mut Option<usize>,
+    pending_model: &'a mut Option<Vec<usize>>,
     /// Loaded model's name, so the browser can mark the active row.
     current_model: &'a str,
+    /// The rig, for the Rig page's tree.
+    bones: &'a [formats::Bone],
+    /// Depth per bone, precomputed once — the tree indents by it.
+    bone_depth: &'a [usize],
+    selected_bone: &'a mut Option<usize>,
+    /// Which DTEX record the Textures page is showing.
+    selected_tex: &'a mut Option<usize>,
+    /// Model-browser groupings (rule-based + user overrides), for the grouped model tree.
+    groups: &'a crate::models::Groups,
+    /// A right-click "move to group" request: (model index, new category), applied after the UI.
+    pending_group: &'a mut Option<(usize, String)>,
+    /// True until the model list has streamed in from the megapack — show a spinner meanwhile.
+    models_loading: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -863,75 +1515,216 @@ fn build_ui(
     mesh_stats: (usize, usize, usize), // verts, tris, bones
     model_name: &str,
     load_status: &Option<(String, bool)>,
+    page: &mut Page,
+    thumbs: &mut Thumbs,
     mats: &mut MatsCtx,
     nav: &mut NavCtx,
+    ed: &mut crate::editor::Editor,
 ) {
+    // How much of each page's subject is accounted for. Only Materials is strictly work-remaining
+    // (a binding is a decision you make); the rest are coverage. Both answer the same question —
+    // how much of this is resolved — which is what the rail meter reports.
+    let bound = mats.submesh_prov.iter().filter(|p| **p == resolve::Prov::Bound).count();
+    let textured = mats.submesh_tex.iter().filter(|s| s.is_some()).count();
+    let used: usize = {
+        let mut seen: Vec<usize> = mats.submesh_tex.iter().flatten().copied().collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen.len()
+    };
+    let on_rig = playable_rows.len();
+
+    // 1-4 select a page — but not while a text field has focus, or you cannot type "1" into the
+    // search box.
+    if !ctx.wants_keyboard_input() {
+        for p in Page::ALL {
+            if ctx.input(|i| i.key_pressed(p.key())) {
+                *page = p;
+            }
+        }
+    }
+
+    // Land any editor assets that finished loading since the last frame, before anything renders.
+    ed.pump(ctx);
+
     // ── COMMAND BAR ──
-    egui::TopBottomPanel::top("cmdbar").show(ctx, |ui| {
-        ui.add_space(3.0);
-        ui.horizontal(|ui| {
+    //
+    // Fixed height with the row centred inside it, rather than `add_space` either side of an
+    // auto-sized row. A panel that sizes to its tallest child cannot be padded symmetrically: the
+    // brand mark is 26 px while the title's line box is ~28, so equal spacers still produced 6 px
+    // above and 13 px below. Pinning the height and centring makes the spacing symmetric by
+    // construction, at any type scale.
+    egui::TopBottomPanel::top("cmdbar")
+        .exact_height(theme::BAR_H)
+        .frame(theme::bar_frame())
+        .show(ctx, |ui| {
+        // `horizontal_centered` lays out left-to-right AND takes the panel's full height, so every
+        // child — including the right-aligned group that nests its own layout — centres against the
+        // whole band instead of against whatever row height earlier items happened to set.
+        ui.horizontal_centered(|ui| {
             theme::brand_mark(ui);
             ui.add_space(2.0);
-            ui.label(theme::disp_text("SAB WORKSHOP", 15.0, theme::TX));
-            ui.label(theme::disp_text("ASSET WORKBENCH", 10.0, theme::FAINT));
+            ui.label(theme::poster_text("SAB WORKSHOP", 18.0, theme::TX));
+            ui.label(theme::data_text("ASSET WORKBENCH", 9.0, theme::FAINT));
             ui.separator();
-            ui.label(theme::disp_text(model_name, 12.0, theme::BRASS));
+            // On Inspect the subject is the model; on an editor page the subject is the MOD — it is
+            // the document those pages are all editing, so it belongs where a filename would be.
+            match page.editor() {
+                None => {
+                    ui.label(theme::data_text(model_name, 11.5, theme::RED));
+                }
+                Some(_) => {
+                    let (name, out) = ed.mod_chip();
+                    ui.label(theme::disp_text("MOD", 10.0, theme::FAINT));
+                    ui.label(theme::data_text(name, 11.5, theme::RED));
+                    ui.label(theme::data_text(out, 10.0, theme::COLD));
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::chip(ui, "orbit", true, None);
-                theme::chip(
-                    ui,
-                    if *show_textures { "textured" } else { "untextured" },
-                    *show_textures,
-                    None,
-                );
-            });
+                match page.editor() {
+                    None => {
+                        theme::chip(ui, "orbit", true, None);
+                        theme::chip(
+                            ui,
+                            if *show_textures { "textured" } else { "untextured" },
+                            *show_textures,
+                            None,
+                        );
+                    }
+                    Some(_) => {
+                        let n = ed.total_pending();
+                        theme::chip(ui, &format!("{n} staged"), n > 0, None);
+                        theme::chip(ui, "sources read-only", false, None);
+                    }
+                }
+                });
         });
-        ui.add_space(3.0);
     });
 
     // Non-fatal load failures — visible but non-blocking.
     if !errors.is_empty() {
         egui::TopBottomPanel::top("errors").show(ctx, |ui| {
             for e in errors {
-                ui.colored_label(theme::HAZARD, format!("load warning: {e}"));
+                ui.colored_label(theme::RED, format!("load warning: {e}"));
             }
         });
     }
 
     // ── STATUS BAR ──
-    egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            let (ok, msg) = if have_pack { (theme::GOOD, "ready") } else { (theme::HAZARD, "no pack") };
+    egui::TopBottomPanel::bottom("status")
+        .exact_height(theme::STATUS_H)
+        .frame(theme::bar_frame())
+        .show(ctx, |ui| {
+        // `horizontal_centered` lays out left-to-right AND takes the panel's full height, so every
+        // child — including the right-aligned group that nests its own layout — centres against the
+        // whole band instead of against whatever row height earlier items happened to set.
+        ui.horizontal_centered(|ui| {
+            let (ok, msg) = if have_pack { (theme::EMBER, "ready") } else { (theme::RED, "no pack") };
             theme::status_dot(ui, msg, ok);
             ui.separator();
-            ui.label(theme::disp_text(
+            ui.label(theme::data_text(
                 format!("{} verts · {} tris · {} bones", mesh_stats.0, mesh_stats.1, mesh_stats.2),
-                9.5,
+                10.0,
                 theme::DIM,
             ));
             ui.separator();
-            let textured = mats.submesh_tex.iter().filter(|s| s.is_some()).count();
-            ui.label(theme::disp_text(
-                format!("{textured}/{} submeshes textured", mats.submeshes.len()),
-                9.5,
+            // Each page reports the fact IT is about; the status bar is not a fixed readout.
+            ui.label(theme::data_text(
+                match page.editor() {
+                    None => format!("{textured}/{} submeshes textured", mats.submeshes.len()),
+                    Some(ep) => ed.status(ep),
+                },
+                10.0,
                 theme::DIM,
             ));
             if let Some((msg, is_err)) = load_status {
                 ui.separator();
                 ui.label(
-                    egui::RichText::new(msg)
-                        .size(10.5)
-                        .color(if *is_err { theme::HAZARD } else { theme::GOOD }),
+                    theme::data_text(msg, 10.0, if *is_err { theme::RED } else { theme::EMBER }),
                 );
             }
         });
-        ui.add_space(2.0);
     });
+
+    // ── RAIL ──
+    // Declared before the navigator so it owns the far-left edge, and after the status bar so it
+    // does not eat the full window height.
+    egui::SidePanel::left("rail")
+        .exact_width(theme::RAIL_W)
+        .resizable(false)
+        .frame(egui::Frame::none().fill(theme::G0))
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            ui.add_space(4.0);
+            for (i, p) in Page::ALL.iter().enumerate() {
+                // Inspect meters coverage; an editor page meters WORK — how many edits are staged on
+                // it. Same widget, and on an editor the count is the more useful fact.
+                let (done, total) = match p {
+                    Page::Inspect => (textured, mats.submeshes.len()),
+                    _ => (0, 0),
+                };
+                let r = theme::rail_button(
+                    ui,
+                    &format!("{}", i + 1),
+                    p.glyph(),
+                    p.label(),
+                    *page == *p,
+                    done,
+                    total,
+                );
+                // staged-edit badge, top-right of the button
+                if let Some(ep) = p.editor() {
+                    let n = ed.pending(ep);
+                    if n > 0 {
+                        let b = egui::Rect::from_min_size(
+                            r.rect.right_top() + egui::vec2(-19.0, 5.0),
+                            egui::vec2(14.0, 14.0),
+                        );
+                        ui.painter().rect_filled(b, egui::Rounding::ZERO, theme::EMBER);
+                        ui.painter().text(
+                            b.center(),
+                            egui::Align2::CENTER_CENTER,
+                            format!("{n}"),
+                            egui::FontId::new(9.0, theme::data()),
+                            theme::G0,
+                        );
+                    }
+                }
+                if r.clicked() {
+                    *page = *p;
+                }
+                let note = match p.editor() {
+                    None => format!("{textured}/{} submeshes textured", mats.submeshes.len()),
+                    Some(ep) => ed.status(ep),
+                };
+                r.on_hover_text(format!("{}  ({})", p.label(), note));
+            }
+        });
+
+    // ── EDITOR PAGES ──
+    // Same three-column shell as Inspect — navigator, work surface, right rail — because these are
+    // views onto one document, not standalone file editors. The right rail is the CHANGELIST, and it
+    // is present on every editor page: a mod spans all three, so the record of it has to as well.
+    if let Some(ed_page) = page.editor() {
+        egui::SidePanel::left("ed_nav")
+            .resizable(true)
+            .default_width(320.0)
+            .width_range(260.0..=480.0)
+            .show(ctx, |ui| ed.nav(ui, ed_page));
+        egui::SidePanel::right("ed_side")
+            .resizable(true)
+            .default_width(350.0)
+            .width_range(290.0..=480.0)
+            .show(ctx, |ui| ed.side(ui, ed_page));
+        ed.central(ctx, ed_page);
+        return;
+    }
 
     // ── TRANSPORT ──
     egui::TopBottomPanel::bottom("transport").show(ctx, |ui| {
         ui.add_space(4.0);
+
+
         match current {
             None => {
                 ui.label(
@@ -941,7 +1734,7 @@ fn build_ui(
             }
             Some(clip) => {
                 ui.horizontal(|ui| {
-                    ui.label(theme::disp_text(&clip.name, 12.0, theme::BRASS));
+                    ui.label(theme::data_text(&clip.name, 11.5, theme::RED));
                     ui.separator();
                     let frame = if clip.frame_duration > 0.0 {
                         (playback.time / clip.frame_duration).round() as i64
@@ -1007,16 +1800,25 @@ fn build_ui(
         // rows below are feedback-free, but this bounds the blast radius of a future one.
         .width_range(240.0..=460.0)
         .show(ctx, |ui| {
-            theme::eyebrow(ui, "Browser");
+            theme::eyebrow(
+                ui,
+                match *page {
+                    Page::Inspect => "Browser",
+                    _ => "",
+                },
+            );
             ui.add_space(4.0);
-            // Category selector — the navigator browses the PACK, not just clips.
-            ui.horizontal(|ui| {
-                for t in NavTab::ALL {
-                    if theme::pill(ui, t.label(), *nav.tab == t).clicked() {
-                        *nav.tab = t;
+            // Category selector — Inspect browses the PACK, not just clips. The other pages each
+            // have exactly one subject, so they get no selector.
+            if *page == Page::Inspect {
+                ui.horizontal(|ui| {
+                    for t in NavTab::ALL {
+                        if theme::pill(ui, t.label(), *nav.tab == t).clicked() {
+                            *nav.tab = t;
+                        }
                     }
-                }
-            });
+                });
+            }
             ui.horizontal(|ui| {
                 // Right-to-left: the ✕ is placed first (at the right), then the field fills EXACTLY
                 // the remainder — so total content == available. Sizing the field from
@@ -1035,71 +1837,87 @@ fn build_ui(
             let needle = nav.search.to_ascii_lowercase();
             ui.add_space(2.0);
 
-            match *nav.tab {
-                NavTab::Models => {
-                    let rows: Vec<usize> = nav
-                        .models
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, m)| needle.is_empty() || m.name.to_ascii_lowercase().contains(&needle))
-                        .map(|(i, _)| i)
-                        .collect();
-                    ui.label(theme::disp_text(
-                        format!("{} of {} model(s)", rows.len(), nav.models.len()),
-                        9.5,
+            // Materials and Rig have their own subjects; Inspect's pills pick between models and
+            // clips. Textures lists the pool the contact sheet is showing.
+            match (*page, *nav.tab) {
+                (Page::Inspect, NavTab::Models) if nav.models_loading => {
+                    // The model list is still streaming from the megapack — show a spinner, not an
+                    // empty tree.
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(16.0));
+                        ui.label(theme::data_text("loading from megapack…", 11.0, theme::DIM));
+                    });
+                }
+                (Page::Inspect, NavTab::Models) => {
+                    // List assembled ASSETS (from GameTemplates), grouped by category. A user override
+                    // wins over the template-derived default; nothing is hidden (Ungrouped catches the
+                    // rest). Selecting an asset loads its primary part and reveals its parts (inspector).
+                    let mut by_cat: std::collections::HashMap<&str, Vec<usize>> =
+                        std::collections::HashMap::new();
+                    let mut shown = 0usize;
+                    for (i, a) in nav.browse_assets.iter().enumerate() {
+                        if !needle.is_empty() && !a.name.to_ascii_lowercase().contains(&needle) {
+                            continue;
+                        }
+                        by_cat.entry(nav.groups.category(&a.name, a.category)).or_default().push(i);
+                        shown += 1;
+                    }
+                    ui.label(theme::data_text(
+                        format!("{shown} of {} asset(s)", nav.browse_assets.len()),
+                        10.0,
                         theme::FAINT,
                     ));
-                    ui.separator();
-                    ui.add_space(4.0);
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
-                        ui,
-                        18.0,
-                        rows.len(),
-                        |ui, range| {
-                            for r in range {
-                                let i = rows[r];
-                                let m = &nav.models[i];
-                                let sel = m.name.eq_ignore_ascii_case(nav.current_model);
-                                if ui.selectable_label(sel, &m.name).clicked() {
-                                    *nav.pending_model = Some(i);
-                                }
-                            }
-                        },
-                    );
-                }
-                NavTab::Textures => {
-                    let rows: Vec<usize> = nav
-                        .assets
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, a)| needle.is_empty() || a.name.to_ascii_lowercase().contains(&needle))
-                        .map(|(i, _)| i)
-                        .collect();
-                    ui.label(theme::disp_text(
-                        format!("{} of {} texture(s) — this asset's bundle", rows.len(), nav.assets.len()),
-                        9.5,
+                    ui.label(theme::data_text(
+                        "click to load · parts on the right · right-click to regroup",
+                        9.0,
                         theme::FAINT,
                     ));
                     ui.separator();
                     ui.add_space(4.0);
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        for r in rows {
-                            let a = &nav.assets[r];
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(&a.name).size(11.5));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("{}x{} {}", a.width, a.height, a.role.label()))
-                                            .monospace()
-                                            .size(9.0)
-                                            .color(theme::FAINT),
-                                    );
-                                });
+                        for cat in crate::models::CATEGORIES {
+                            let Some(idxs) = by_cat.get(*cat) else { continue };
+                            if idxs.is_empty() {
+                                continue;
+                            }
+                            let open = !needle.is_empty() || *cat == "Characters";
+                            egui::CollapsingHeader::new(
+                                egui::RichText::new(format!("{cat}  ({})", idxs.len()))
+                                    .color(theme::TX)
+                                    .size(11.0),
+                            )
+                            .id_source(("modelcat", cat))
+                            .default_open(open)
+                            .show(ui, |ui| {
+                                for &i in idxs {
+                                    let a = &nav.browse_assets[i];
+                                    let sel = *nav.sel_asset == Some(i);
+                                    let label = if a.parts.len() > 1 {
+                                        format!("{}  ({} parts)", a.name, a.parts.len())
+                                    } else {
+                                        a.name.clone()
+                                    };
+                                    let r = ui.selectable_label(sel, label);
+                                    if r.clicked() {
+                                        *nav.sel_asset = Some(i);
+                                        *nav.pending_model = Some(a.assembly());
+                                    }
+                                    r.context_menu(|ui| {
+                                        ui.label(theme::data_text("Move to group", 10.0, theme::FAINT));
+                                        for c in crate::models::CATEGORIES {
+                                            if ui.button(*c).clicked() {
+                                                *nav.pending_group = Some((i, (*c).to_string()));
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                }
                             });
                         }
                     });
                 }
-                NavTab::Animations => {
+                (Page::Inspect, NavTab::Animations) => {
                     if theme::pill(ui, "show all (incl. non-rig)", *show_all).clicked() {
                         *show_all = !*show_all;
                     }
@@ -1114,13 +1932,13 @@ fn build_ui(
                             needle.is_empty() || catalog.clips[i].name.to_ascii_lowercase().contains(&needle)
                         })
                         .collect();
-                    ui.label(theme::disp_text(format!("{} clip(s)", matches.len()), 9.5, theme::FAINT));
+                    ui.label(theme::data_text(format!("{} clip(s)", matches.len()), 10.0, theme::FAINT));
                     if !have_pack {
-                        ui.colored_label(theme::HAZARD, "Animations.pack not loaded — bind pose only.");
+                        ui.colored_label(theme::RED, "Animations.pack not loaded — bind pose only.");
                     }
                     if !rig_ok {
                         ui.colored_label(
-                            theme::HAZARD,
+                            theme::RED,
                             "Loaded model's rig differs from the clip catalog — clips disabled.",
                         );
                     }
@@ -1148,6 +1966,8 @@ fn build_ui(
                         },
                     );
                 }
+                // Editor pages return before the navigator; only Inspect reaches this match.
+                (_, _) => {}
             }
         });
 
@@ -1158,18 +1978,54 @@ fn build_ui(
         .width_range(280.0..=460.0) // see the navigator's note on content-width feedback
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                theme::card(ui, "Character", None, |ui| {
-                    theme::kv(ui, "vertices", egui::RichText::new(mesh_stats.0.to_string()));
-                    theme::kv(ui, "triangles", egui::RichText::new(mesh_stats.1.to_string()));
-                    theme::kv(ui, "bones", egui::RichText::new(mesh_stats.2.to_string()));
-                    theme::kv(ui, "clips", egui::RichText::new(catalog.clips.len().to_string()));
-                });
 
-                let textured = mats.submesh_tex.iter().filter(|s| s.is_some()).count();
-                let badge = format!("{textured}/{}", mats.submeshes.len());
+                // ---- Inspect: what you are looking at ----
+                if *page == Page::Inspect {
+                    theme::card(ui, "Character", None, |ui| {
+                        theme::kv(ui, "vertices", egui::RichText::new(mesh_stats.0.to_string()));
+                        theme::kv(ui, "triangles", egui::RichText::new(mesh_stats.1.to_string()));
+                        theme::kv(ui, "bones", egui::RichText::new(mesh_stats.2.to_string()));
+                        theme::kv(ui, "clips", egui::RichText::new(catalog.clips.len().to_string()));
+                    });
+                    // Parts of the selected asset — each is loadable (inspectable) individually.
+                    if let Some(a) = nav.sel_asset.and_then(|ai| nav.browse_assets.get(ai)) {
+                        let badge = format!("{}", a.parts.len());
+                        theme::card(ui, "Parts", Some(&badge), |ui| {
+                            ui.label(theme::data_text(&a.name, 10.5, theme::RED));
+                            ui.add_space(3.0);
+                            for p in &a.parts {
+                                let loaded = p.name.eq_ignore_ascii_case(nav.current_model);
+                                let r = ui.selectable_label(
+                                    loaded,
+                                    egui::RichText::new(format!("{}   {}", p.label, p.name))
+                                        .monospace()
+                                        .size(10.5),
+                                );
+                                if r.clicked() {
+                                    *nav.pending_model = Some(vec![p.mesh_index]);
+                                }
+                            }
+                        });
+                    }
+                    if let Some(clip) = current {
+                        theme::card(ui, "Clip", None, |ui| {
+                            theme::kv(
+                                ui,
+                                "name",
+                                egui::RichText::new(&clip.name).color(theme::RED),
+                            );
+                            theme::kv(ui, "duration", egui::RichText::new(format!("{:.2} s", clip.duration)));
+                            theme::kv(ui, "tracks", egui::RichText::new(clip.track_to_bone.len().to_string()));
+                        });
+                    }
+                    return;
+                }
+
+                // ---- Materials: the bind ledger ----
+                let badge = format!("{bound}/{} bound", mats.submeshes.len());
                 theme::section(ui, "Materials", Some(&badge), true, |ui| {
                     if mats.assets.is_empty() {
-                        ui.colored_label(theme::HAZARD, "No textures resolved — check --megapack / --char.");
+                        ui.colored_label(theme::RED, "No textures resolved — check --megapack / --char.");
                         return;
                     }
                     ui.label(
@@ -1184,31 +2040,45 @@ fn build_ui(
                     for (i, sm) in mats.submeshes.iter().enumerate() {
                         let assigned = mats.submesh_tex[i];
                         let cur = assigned.map(|ai| mats.assets[ai].name.as_str()).unwrap_or("(none)");
+                        // Will to Fight, as information design: a submesh with a texture bound has
+                        // had its colour returned; one without is still occupied, and stays grey.
+                        // This is the resting state — nothing toggles it.
                         let (fill, border) = if assigned.is_some() {
-                            (theme::BRASS_SOFT, theme::BRASS_DK)
+                            (theme::EMBER_SOFT, theme::EMBER_DK)
                         } else {
                             (theme::G0, theme::LINE)
                         };
                         theme::row_chip(ui, fill, border, |ui| {
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(theme::disp_text(format!("{i:02}"), 10.0, theme::BRASS));
-                                    ui.label(
-                                        egui::RichText::new(format!("{} tris", sm.index_count / 3))
-                                            .monospace()
-                                            .size(10.0)
-                                            .color(theme::DIM),
-                                    );
+                                    let ix = if assigned.is_some() { theme::EMBER } else { theme::FAINT };
+                                    ui.label(theme::data_text(format!("{i:02}"), 10.0, ix));
+                                    ui.label(theme::data_text(
+                                        format!("{} tris", sm.index_count / 3),
+                                        10.0,
+                                        theme::DIM,
+                                    ));
                                     // The prim's material hashes — what WSAO would have resolved.
                                     let hashes: Vec<String> =
                                         sm.materials.iter().map(|m| format!("{m:08X}")).collect();
-                                    ui.label(
-                                        egui::RichText::new(hashes.join(" "))
-                                            .monospace()
-                                            .size(9.0)
-                                            .color(theme::FAINT),
-                                    )
-                                    .on_hover_text("prim material hashes (pandemic_hash of a WSAO material name)");
+                                    ui.label(theme::data_text(hashes.join(" "), 9.0, theme::FAINT))
+                                        .on_hover_text("prim material hashes (pandemic_hash of a WSAO material name)");
+                                    // A binding never pretends to be a resolution: say how we got it.
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let (label, kind) = match mats.submesh_prov[i] {
+                                                resolve::Prov::Bound => ("bound", theme::Badge::Lit),
+                                                resolve::Prov::Seeded => {
+                                                    ("seeded", theme::Badge::Outline)
+                                                }
+                                                resolve::Prov::Unresolved => {
+                                                    ("unresolved", theme::Badge::Muted)
+                                                }
+                                            };
+                                            theme::badge(ui, label, kind);
+                                        },
+                                    );
                                 });
                                 egui::ComboBox::from_id_source(("texpick", i))
                                     .selected_text(egui::RichText::new(cur).size(11.0))

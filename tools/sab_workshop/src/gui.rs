@@ -249,39 +249,111 @@ fn to_winit_cursor(c: egui::CursorIcon) -> winit::window::CursorIcon {
     }
 }
 
-/// The workshop's visual system — palette + type + the reusable inspector widgets, so every panel
-/// reads as one tool. ADAPTED from the Mercs2 workshop's `gui::theme` (the activity-rail and the
-/// Unreal Details vec3-scrub widgets are omitted — sab is a single character/anim view). Colours and
-/// roles: warm gunmetal neutrals, **brass** = live/selected, **hazard-orange** = irreversible.
+/// The workshop's visual system — "Occupied": palette + type + the reusable inspector widgets, so
+/// every panel reads as one tool.
+///
+/// The theme takes its cue from the game's **Will to Fight**: an occupied district is desaturated
+/// and colour floods back as it is freed. So the chrome is TRUE-NEUTRAL greyscale (S=0) and colour
+/// is *earned* by state the tool already tracks — a submesh with no texture bound is simply grey,
+/// one with a texture is [`EMBER`]. That is a resting state, not a mode: nothing toggles it.
+///
+/// Roles — and there are only three hues, because a black-and-white city only gets one:
+/// - [`RED`]    live / selected — and, in a different *form* (see [`stamp_button`]), irreversible,
+///              and, outlined, an error. Red is the only colour in occupied Paris.
+/// - [`EMBER`]  resolved / bound / ready — colour returning.
+/// - [`COLD`]   source / reference / read-only.
+///
+/// Danger is deliberately NOT a hue (the old hazard-orange retired with the Mercs2 palette): with
+/// one hot colour spent on selection there is none left for "irreversible", so that became a
+/// printed form — see [`stamp_button`].
+///
+/// Adapted from the Mercs2 workshop's `gui::theme`, but the neutrals are re-based: Mercs2's greys
+/// lean warm to sit under brass, and that warm bias was the single loudest tell that this tool was
+/// wearing another game's clothes.
 #[allow(dead_code)] // a complete token+widget set; not every item is wired into the UI yet
 pub mod theme {
     use egui::{Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
 
-    // ── palette (warm gunmetal / painted metal) ──
-    pub const G0: Color32 = Color32::from_rgb(0x12, 0x13, 0x16); // app ground
-    pub const G1: Color32 = Color32::from_rgb(0x1a, 0x1c, 0x20); // panels
-    pub const G2: Color32 = Color32::from_rgb(0x22, 0x25, 0x2b); // cards / inputs
-    pub const G3: Color32 = Color32::from_rgb(0x2b, 0x2f, 0x37); // raised / hover
-    pub const LINE: Color32 = Color32::from_rgb(0x33, 0x37, 0x3f);
-    pub const LINE2: Color32 = Color32::from_rgb(0x42, 0x47, 0x4f);
-    pub const TX: Color32 = Color32::from_rgb(0xdc, 0xd8, 0xce); // warm neutral text
-    pub const DIM: Color32 = Color32::from_rgb(0x9a, 0x95, 0x8a);
-    pub const FAINT: Color32 = Color32::from_rgb(0x67, 0x63, 0x5a);
-    // semantic accents
-    pub const BRASS: Color32 = Color32::from_rgb(0xe6, 0xb2, 0x3c); // live / selected
-    pub const BRASS_DK: Color32 = Color32::from_rgb(0xa6, 0x7c, 0x22);
-    pub const BRASS_SOFT: Color32 = Color32::from_rgb(0x35, 0x30, 0x1c); // brass @ ~12% over G1
-    pub const HAZARD: Color32 = Color32::from_rgb(0xe8, 0x76, 0x3a); // irreversible only
-    pub const HAZARD_SOFT: Color32 = Color32::from_rgb(0x34, 0x24, 0x1a);
-    pub const GOOD: Color32 = Color32::from_rgb(0x8f, 0xbf, 0x4f);
-    pub const INFO: Color32 = Color32::from_rgb(0x63, 0xa6, 0xcf);
-    pub const BAD: Color32 = Color32::from_rgb(0xd5, 0x60, 0x4c);
+    // ── palette (film base / newsprint — true neutral, S=0) ──
+    pub const G0: Color32 = Color32::from_rgb(0x0a, 0x0b, 0x0c); // app ground
+    pub const G1: Color32 = Color32::from_rgb(0x13, 0x14, 0x17); // panels
+    pub const G2: Color32 = Color32::from_rgb(0x1a, 0x1c, 0x1f); // cards / inputs
+    pub const G3: Color32 = Color32::from_rgb(0x24, 0x26, 0x2a); // raised / hover
+    pub const LINE: Color32 = Color32::from_rgb(0x30, 0x33, 0x38);
+    pub const LINE2: Color32 = Color32::from_rgb(0x43, 0x46, 0x4c);
+    // Text ramp. Measured against the panel (`G1`) and card (`G2`) grounds, because a value that
+    // only looks right on one of them fails on the other:
+    //
+    //   TX     13.8:1   primary
+    //   DIM     6.7:1   secondary
+    //   FAINT   4.8:1   tertiary  (was 2.5:1 — a hard WCAG-AA fail)
+    //
+    // FAINT was the real problem: it carried the hints, hashes and counts — the data this tool
+    // exists to show — at 8-10 px, where small type needs MORE contrast, not less. A "quiet" colour
+    // is only quiet if it can still be read.
+    pub const TX: Color32 = Color32::from_rgb(0xe9, 0xe7, 0xe2); // newsprint white
+    pub const DIM: Color32 = Color32::from_rgb(0xa5, 0xa2, 0x9c);
+    pub const FAINT: Color32 = Color32::from_rgb(0x8a, 0x87, 0x7f);
 
-    /// The condensed industrial display family (Bahnschrift, shipped on Windows). Falls back to the
-    /// proportional stack when absent so `FontFamily::Name("disp")` always resolves.
+    // ── semantic accents ──
+    /// Live / selected. Also errors (outlined) and irreversible ([`stamp_button`], filled).
+    /// Brightened from #d42a34 (3.4:1 — fine as a fill, too dark as TEXT) to clear AA at 4.6:1,
+    /// since selected rows and error lines are read, not just noticed.
+    pub const RED: Color32 = Color32::from_rgb(0xeb, 0x4b, 0x53);
+    pub const RED_DK: Color32 = Color32::from_rgb(0x8c, 0x1a, 0x22);
+    pub const RED_SOFT: Color32 = Color32::from_rgb(0x2a, 0x11, 0x14);
+    /// Resolved / bound / ready — the colour that comes back.
+    pub const EMBER: Color32 = Color32::from_rgb(0xd9, 0x8f, 0x3d);
+    pub const EMBER_DK: Color32 = Color32::from_rgb(0x8a, 0x56, 0x20);
+    pub const EMBER_SOFT: Color32 = Color32::from_rgb(0x24, 0x1a, 0x10);
+    /// Source / reference / read-only — cold window light.
+    pub const COLD: Color32 = Color32::from_rgb(0x6e, 0x8f, 0xa6);
+    pub const COLD_DK: Color32 = Color32::from_rgb(0x3d, 0x56, 0x66);
+    pub const COLD_SOFT: Color32 = Color32::from_rgb(0x14, 0x1b, 0x20);
+    /// Ink — text ON a filled [`RED`] or [`EMBER`] ground (a stamp, a primary button).
+    pub const INK: Color32 = Color32::from_rgb(0x12, 0x08, 0x0a);
+
+    /// The label display family — Oswald Medium, at ≤13px: eyebrows, chips, pills, buttons.
+    /// Bundled (see [`install`]), so it resolves on any machine.
     pub fn disp() -> FontFamily {
         FontFamily::Name("disp".into())
     }
+
+    /// The poster display family — Oswald SemiBold, at ≥18px: titles, the brand, the boot screen.
+    /// The extra weight is what carries an occupation-notice headline; at 11px it would just clog.
+    pub fn poster() -> FontFamily {
+        FontFamily::Name("poster".into())
+    }
+
+    /// The data family — Courier New. Every number this tool prints is evidence about an occupied
+    /// city: hashes, bone counts, durations, byte sizes. They all get the typewriter.
+    pub fn data() -> FontFamily {
+        FontFamily::Monospace
+    }
+
+    /// The corner cut, in points, for [`card`] / [`section`] — Deco, printed, not rounded.
+    pub const CUT: f32 = 7.0;
+
+    /// A chamfered rect: the card silhouette, with the top-left and bottom-right corners cut.
+    /// egui's `Rounding` only does radii, so the frames paint this polygon themselves.
+    pub fn chamfer(r: egui::Rect, cut: f32) -> Vec<egui::Pos2> {
+        let c = cut.min(r.width() * 0.5).min(r.height() * 0.5).max(0.0);
+        vec![
+            egui::pos2(r.left() + c, r.top()),
+            egui::pos2(r.right(), r.top()),
+            egui::pos2(r.right(), r.bottom() - c),
+            egui::pos2(r.right() - c, r.bottom()),
+            egui::pos2(r.left(), r.bottom()),
+            egui::pos2(r.left(), r.top() + c),
+        ]
+    }
+
+    /// Oswald, instanced from the upstream variable font at a fixed weight (egui's glyph backend
+    /// ignores `fvar`, so a variable TTF would silently render at wght=400). SIL OFL 1.1 — no
+    /// Reserved Font Name, so the instances keep the name; see `assets/fonts/OFL.txt`.
+    /// Embedded rather than read from disk: the old `C:/Windows/Fonts` reads worked only here.
+    const OSWALD_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Oswald-Medium.ttf");
+    const OSWALD_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Oswald-SemiBold.ttf");
 
     fn load_font(defs: &mut egui::FontDefinitions, key: &str, paths: &[&str]) -> bool {
         for p in paths {
@@ -300,26 +372,39 @@ pub mod theme {
         if load_font(&mut fonts, "segoe", &["C:/Windows/Fonts/segoeui.ttf"]) {
             fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "segoe".to_owned());
         }
-        // Display: Bahnschrift for the stencil eyebrows / headings.
-        let disp_key = if load_font(&mut fonts, "disp_ttf", &["C:/Windows/Fonts/bahnschrift.ttf"]) {
-            if let Some(fd) = fonts.font_data.get_mut("disp_ttf") {
-                fd.tweak.y_offset_factor = 0.09;
+        // Data: Courier New — the typewriter voice for every number the tool prints. Bold, because
+        // Courier Regular at 10-11px on a near-black ground is too thin to read.
+        if load_font(&mut fonts, "courier", &["C:/Windows/Fonts/courbd.ttf", "C:/Windows/Fonts/cour.ttf"]) {
+            fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "courier".to_owned());
+        }
+        // Display: bundled Oswald. The proportional stack is appended as a FALLBACK so glyphs
+        // Oswald lacks (▶ ⏸ ✕ ⌕ …) still resolve instead of rendering tofu.
+        let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+        for (key, bytes, family) in [
+            ("oswald_md", OSWALD_MEDIUM, "disp"),
+            ("oswald_sb", OSWALD_SEMIBOLD, "poster"),
+        ] {
+            fonts.font_data.insert(key.to_owned(), egui::FontData::from_static(bytes));
+            // Oswald sits high in its em box next to Segoe; nudge it onto the same baseline.
+            if let Some(fd) = fonts.font_data.get_mut(key) {
+                fd.tweak.y_offset_factor = 0.06;
             }
-            vec!["disp_ttf".to_owned()]
-        } else {
-            fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default()
-        };
-        fonts.families.insert(FontFamily::Name("disp".into()), disp_key);
+            let mut stack = vec![key.to_owned()];
+            stack.extend(fallback.iter().cloned());
+            fonts.families.insert(FontFamily::Name(family.into()), stack);
+        }
         ctx.set_fonts(fonts);
 
         // ── type scale + visuals ──
         let mut style = (*ctx.style()).clone();
-        let disp = FontFamily::Name("disp".into());
-        style.text_styles.insert(TextStyle::Heading, FontId::new(18.0, disp.clone()));
-        style.text_styles.insert(TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
-        style.text_styles.insert(TextStyle::Button, FontId::new(13.0, FontFamily::Proportional));
-        style.text_styles.insert(TextStyle::Small, FontId::new(11.0, FontFamily::Proportional));
-        style.text_styles.insert(TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace));
+        // Same scale as the text helpers, so egui's own widgets (buttons, text fields, tooltips)
+        // never drift out of step with the theme's labels.
+        let sc = |pt: f32| pt * TYPE_SCALE;
+        style.text_styles.insert(TextStyle::Heading, FontId::new(sc(20.0), poster()));
+        style.text_styles.insert(TextStyle::Body, FontId::new(sc(13.0), FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Button, FontId::new(sc(13.0), FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Small, FontId::new(sc(11.0), FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Monospace, FontId::new(sc(11.5), FontFamily::Monospace));
 
         let mut v = egui::Visuals::dark();
         v.panel_fill = G1;
@@ -328,11 +413,13 @@ pub mod theme {
         v.extreme_bg_color = G0;
         v.faint_bg_color = G2;
         v.override_text_color = Some(TX);
-        v.hyperlink_color = BRASS;
-        v.selection.bg_fill = BRASS_SOFT;
-        v.selection.stroke = Stroke::new(1.0, BRASS);
-        v.window_rounding = Rounding::same(7.0);
-        let round = Rounding::same(5.0);
+        v.hyperlink_color = RED;
+        v.selection.bg_fill = RED_SOFT;
+        v.selection.stroke = Stroke::new(1.0, RED);
+        // Printed edges, not soft ones: widgets are square, and the cards cut their own corners
+        // (see `chamfer`) rather than rounding them.
+        v.window_rounding = Rounding::ZERO;
+        let round = Rounding::ZERO;
         v.widgets.noninteractive.bg_fill = G1;
         v.widgets.noninteractive.weak_bg_fill = G1;
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
@@ -350,8 +437,8 @@ pub mod theme {
         v.widgets.hovered.rounding = round;
         v.widgets.active.bg_fill = G3;
         v.widgets.active.weak_bg_fill = G3;
-        v.widgets.active.bg_stroke = Stroke::new(1.0, BRASS_DK);
-        v.widgets.active.fg_stroke = Stroke::new(1.0, BRASS);
+        v.widgets.active.bg_stroke = Stroke::new(1.0, RED_DK);
+        v.widgets.active.fg_stroke = Stroke::new(1.0, RED);
         v.widgets.active.rounding = round;
         v.widgets.open.bg_fill = G2;
         v.widgets.open.weak_bg_fill = G2;
@@ -366,29 +453,90 @@ pub mod theme {
         ctx.set_style(style);
     }
 
-    /// Display-family rich text at a chosen size/colour (headings, chips, titles).
+    /// Global type scale. Every size in the theme — the `TextStyle` scale in [`install`] and the
+    /// three text helpers — is multiplied by this, so the whole system grows together and the
+    /// hierarchy between voices is preserved. Change this, not individual call sites.
+    pub const TYPE_SCALE: f32 = 1.2;
+
+    // Type floors, in PRE-scale points. Enforced here rather than trusted to call sites, because
+    // the sizes that crept down to 8px were all written inline at the point of use and no reviewer
+    // catches that by eye. Tracked uppercase needs the most room to stay legible; Courier the least.
+    const MIN_DISP: f32 = 10.5;
+    const MIN_DATA: f32 = 10.0;
+    const MIN_POSTER: f32 = 15.0;
+
+    /// Clamp to the voice's floor, then apply the global scale.
+    fn sized(size: f32, floor: f32) -> f32 {
+        size.max(floor) * TYPE_SCALE
+    }
+
+    /// The LABEL voice: Oswald Medium, tracked. UI chrome that names things — eyebrows, chips,
+    /// pills, column heads. Tracking scales with size so the whole set reads as one system.
     pub fn disp_text(text: impl Into<String>, size: f32, color: Color32) -> egui::RichText {
-        egui::RichText::new(text.into()).family(disp()).size(size).color(color)
+        let size = sized(size, MIN_DISP);
+        egui::RichText::new(text.into())
+            .family(disp())
+            .size(size)
+            .color(color)
+            .extra_letter_spacing(size * 0.11)
     }
 
-    /// A stencil eyebrow label (Bahnschrift, uppercased, dim) — the section-header voice.
+    /// The POSTER voice: Oswald SemiBold. Titles and the brand — an occupation notice, not a
+    /// caption. Too heavy to use small, hence the floor.
+    pub fn poster_text(text: impl Into<String>, size: f32, color: Color32) -> egui::RichText {
+        let size = sized(size, MIN_POSTER);
+        egui::RichText::new(text.into())
+            .family(poster())
+            .size(size)
+            .color(color)
+            .extra_letter_spacing(size * 0.04)
+    }
+
+    /// The DATA voice: Courier. Anything the tool *found* rather than anything it says — asset
+    /// names, hashes, counts, durations, byte sizes. Never uppercased: these are verbatim.
+    pub fn data_text(text: impl Into<String>, size: f32, color: Color32) -> egui::RichText {
+        egui::RichText::new(text.into()).family(data()).size(sized(size, MIN_DATA)).color(color)
+    }
+
+    /// A small red diamond — the mark that opens an eyebrow.
+    fn tick(ui: &mut egui::Ui, color: Color32) {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
+        let c = r.center();
+        let d = 3.5;
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                c + egui::vec2(0.0, -d),
+                c + egui::vec2(d, 0.0),
+                c + egui::vec2(0.0, d),
+                c + egui::vec2(-d, 0.0),
+            ],
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    /// An eyebrow label (red diamond + tracked uppercase, dim) — the section-header voice.
     pub fn eyebrow(ui: &mut egui::Ui, text: &str) -> egui::Response {
-        ui.add(egui::Label::new(
-            egui::RichText::new(text.to_uppercase()).family(disp()).size(11.0).color(DIM),
-        ))
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 7.0;
+            tick(ui, RED);
+            ui.add(egui::Label::new(disp_text(text.to_uppercase(), 11.0, DIM)))
+        })
+        .inner
     }
 
-    /// A HUD chip drawn over the viewport (Orbit / clip position / legend). `on` = lit brass.
+    /// A HUD chip drawn over the viewport (Orbit / clip position / legend). `on` = lit ember,
+    /// i.e. this facet is resolved; off = the resting grey.
     pub fn chip(ui: &mut egui::Ui, label: &str, on: bool, dot: Option<Color32>) {
         let (fg, bg, stroke) = if on {
-            (BRASS, BRASS_SOFT, BRASS_DK)
+            (EMBER, EMBER_SOFT, EMBER_DK)
         } else {
-            (DIM, Color32::from_rgba_unmultiplied(14, 16, 20, 205), LINE)
+            (DIM, Color32::from_rgba_unmultiplied(10, 11, 12, 205), LINE)
         };
         egui::Frame::none()
             .fill(bg)
             .stroke(egui::Stroke::new(1.0, stroke))
-            .rounding(egui::Rounding::same(3.0))
+            .rounding(egui::Rounding::ZERO)
             .inner_margin(egui::Margin::symmetric(9.0, 4.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -402,29 +550,28 @@ pub mod theme {
             });
     }
 
-    /// A framed inspector card: a rounded panel with a stencil eyebrow header (brass tick + title +
-    /// optional right-aligned badge) and the body below. The defining inspector element.
+    /// A framed inspector card: a chamfered panel with a tracked header (title + optional
+    /// right-aligned badge) and the body below. The defining inspector element.
+    ///
+    /// The corners are CUT, not rounded — `egui::Rounding` can't express that, so the card
+    /// reserves a shape slot up front and paints its own silhouette once the content has told it
+    /// how big it ended up.
     pub fn card<R>(
         ui: &mut egui::Ui,
         title: &str,
         badge: Option<&str>,
         add: impl FnOnce(&mut egui::Ui) -> R,
     ) -> R {
-        egui::Frame::none()
-            .fill(G2)
-            .stroke(egui::Stroke::new(1.0, LINE))
-            .rounding(egui::Rounding::same(6.0))
+        let bg = ui.painter().add(egui::Shape::Noop);
+        let ir = egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(11.0, 9.0))
             .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                    ui.painter().rect_filled(r, egui::Rounding::ZERO, BRASS_DK);
-                    ui.add_space(3.0);
-                    ui.label(disp_text(title.to_uppercase(), 11.0, DIM));
+                    ui.label(disp_text(title.to_uppercase(), 11.5, DIM));
                     if let Some(b) = badge {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(b).monospace().size(10.0).color(FAINT));
+                            ui.label(data_text(b, 10.0, FAINT));
                         });
                     }
                 });
@@ -432,8 +579,16 @@ pub mod theme {
                 ui.separator();
                 ui.add_space(5.0);
                 add(ui)
-            })
-            .inner
+            });
+        ui.painter().set(
+            bg,
+            egui::Shape::convex_polygon(
+                chamfer(ir.response.rect, CUT),
+                G2,
+                egui::Stroke::new(1.0, LINE),
+            ),
+        );
+        ir.inner
     }
 
     /// A COLLAPSIBLE framed inspector section (the `card()` look + an expand/collapse toggle).
@@ -445,23 +600,18 @@ pub mod theme {
         default_open: bool,
         add: impl FnOnce(&mut egui::Ui),
     ) {
-        egui::Frame::none()
-            .fill(G2)
-            .stroke(egui::Stroke::new(1.0, LINE))
-            .rounding(egui::Rounding::same(6.0))
+        let bg = ui.painter().add(egui::Shape::Noop);
+        let ir = egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(11.0, 8.0))
             .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
             .show(ui, |ui| {
                 let id = ui.make_persistent_id(("sect", title));
                 egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
                     .show_header(ui, |ui| {
-                        let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                        ui.painter().rect_filled(r, egui::Rounding::ZERO, BRASS_DK);
-                        ui.add_space(3.0);
-                        ui.label(disp_text(title.to_uppercase(), 11.0, DIM));
+                        ui.label(disp_text(title.to_uppercase(), 11.5, DIM));
                         if let Some(b) = badge {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new(b).monospace().size(10.0).color(FAINT));
+                                ui.label(data_text(b, 10.0, FAINT));
                             });
                         }
                     })
@@ -470,10 +620,19 @@ pub mod theme {
                         add(ui);
                     });
             });
+        ui.painter().set(
+            bg,
+            egui::Shape::convex_polygon(
+                chamfer(ir.response.rect, CUT),
+                G2,
+                egui::Stroke::new(1.0, LINE),
+            ),
+        );
     }
 
-    /// A full-width framed, clickable row (the clip / material chip). `fill`/`border` carry the state
-    /// colour (brass = selected, neutral = idle). Returns the row's click response.
+    /// A full-width framed, clickable row (the clip / material chip). `fill`/`border` carry the
+    /// state colour — ember = resolved, red = selected, neutral = still occupied. Returns the
+    /// row's click response.
     pub fn row_chip<R>(
         ui: &mut egui::Ui,
         fill: egui::Color32,
@@ -483,7 +642,7 @@ pub mod theme {
         let ir = egui::Frame::none()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0, border))
-            .rounding(egui::Rounding::same(5.0))
+            .rounding(egui::Rounding::ZERO)
             .inner_margin(egui::Margin::symmetric(9.0, 5.0))
             .outer_margin(egui::Margin { bottom: 4.0, ..Default::default() })
             .show(ui, |ui| {
@@ -495,78 +654,226 @@ pub mod theme {
         ir.response.interact(egui::Sense::click())
     }
 
-    /// A small rounded toggle pill. Brass when `on`, dim when off.
+    /// A small toggle pill. Red when `on` — a pill selects, it does not resolve.
     pub fn pill(ui: &mut egui::Ui, label: &str, on: bool) -> egui::Response {
-        let (fill, stroke, txt) = if on { (BRASS_SOFT, BRASS_DK, BRASS) } else { (G0, LINE, DIM) };
+        let (fill, stroke, txt) = if on { (RED_SOFT, RED_DK, RED) } else { (G0, LINE, DIM) };
         egui::Frame::none()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0, stroke))
-            .rounding(egui::Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+            .rounding(egui::Rounding::ZERO)
+            .inner_margin(egui::Margin::symmetric(9.0, 3.0))
             .outer_margin(egui::Margin { right: 4.0, bottom: 4.0, ..Default::default() })
             .show(ui, |ui| {
-                ui.label(disp_text(label, 10.0, txt));
+                ui.label(disp_text(label.to_uppercase(), 10.5, txt));
             })
             .response
             .interact(egui::Sense::click())
     }
 
-    /// A key → value row inside a card body: dim label left, tabular mono value right-aligned.
+    /// A key → value row inside a card body: tracked label left, tabular Courier value right.
     pub fn kv(ui: &mut egui::Ui, key: &str, value: egui::RichText) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(key).color(DIM).size(12.0));
+            ui.label(disp_text(key.to_uppercase(), 11.0, DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(value.monospace().size(11.5));
+                ui.label(value.family(data()).size(11.5));
             });
         });
     }
 
-    /// A filled brass "go" button. Dimmed when disabled.
+    /// A filled red "go" button — the live action on this page. Dimmed when disabled.
     pub fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-        let fg = if enabled { Color32::from_rgb(0x1c, 0x16, 0x06) } else { FAINT };
-        let bg = if enabled { BRASS } else { G2 };
+        let fg = if enabled { INK } else { FAINT };
+        let bg = if enabled { RED } else { G2 };
         ui.add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new(label).color(fg).strong())
+            egui::Button::new(disp_text(label.to_uppercase(), 12.0, fg))
                 .fill(bg)
-                .stroke(egui::Stroke::new(1.0, if enabled { BRASS } else { LINE })),
+                .rounding(egui::Rounding::ZERO)
+                .stroke(egui::Stroke::new(1.0, if enabled { RED } else { LINE })),
         )
     }
 
-    /// A hazard-orange "irreversible" button (Clear / Reset-all).
-    pub fn danger_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-        ui.add_enabled(
+    /// The STAMP: an irreversible action, as a printed mark rather than a colour.
+    ///
+    /// With one hot hue spent on selection there is no second hue left to mean "danger", so this
+    /// says it with form instead — filled red, tracked caps, ink text, and a hard offset shadow,
+    /// like a notice stamped on paper. It out-shouts any hue at this size, and it cannot be
+    /// confused with a selected row, which is only ever *outlined* red.
+    pub fn stamp_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+        let (fg, bg) = if enabled { (INK, RED) } else { (FAINT, G2) };
+        // Reserve the shadow behind the button, then place it once the button has been laid out.
+        let shadow = ui.painter().add(egui::Shape::Noop);
+        let r = ui.add_enabled(
             enabled,
-            egui::Button::new(disp_text(label.to_uppercase(), 12.0, HAZARD))
-                .fill(HAZARD_SOFT)
-                .stroke(egui::Stroke::new(1.0, HAZARD)),
-        )
+            egui::Button::new(disp_text(label.to_uppercase(), 12.0, fg))
+                .fill(bg)
+                .rounding(egui::Rounding::ZERO)
+                .stroke(egui::Stroke::new(1.0, if enabled { RED } else { LINE })),
+        );
+        if enabled {
+            ui.painter().set(
+                shadow,
+                egui::Shape::rect_filled(
+                    r.rect.translate(egui::vec2(2.0, 2.0)),
+                    egui::Rounding::ZERO,
+                    RED_DK,
+                ),
+            );
+        }
+        r
+    }
+
+    /// How much weight a small badge carries. The CALLER owns the meaning (see `resolve::Prov`);
+    /// the theme only owns the look — filled reads as settled, outlined as provisional, muted as
+    /// absent.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Badge {
+        /// Settled — a thing that is so.
+        Lit,
+        /// Provisional — a thing we guessed.
+        Outline,
+        /// Absent — nothing here yet.
+        Muted,
+    }
+
+    pub fn badge(ui: &mut egui::Ui, label: &str, kind: Badge) {
+        let (fg, bg, stroke) = match kind {
+            Badge::Lit => (EMBER, EMBER_SOFT, EMBER_DK),
+            Badge::Outline => (EMBER_DK, Color32::TRANSPARENT, EMBER_DK),
+            Badge::Muted => (FAINT, G2, LINE),
+        };
+        egui::Frame::none()
+            .fill(bg)
+            .stroke(egui::Stroke::new(1.0, stroke))
+            .rounding(egui::Rounding::ZERO)
+            .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+            .show(ui, |ui| {
+                ui.label(disp_text(label.to_uppercase(), 9.5, fg));
+            });
+    }
+
+    /// A liberation meter: `done / total` of this page's subject, drawn into `r`.
+    pub fn meter_in(painter: &egui::Painter, r: egui::Rect, done: usize, total: usize) {
+        painter.rect_filled(r, egui::Rounding::ZERO, G3);
+        if total > 0 && done > 0 {
+            let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
+            let mut lit = r;
+            lit.set_width(r.width() * frac);
+            painter.rect_filled(lit, egui::Rounding::ZERO, EMBER);
+        }
+    }
+
+    /// The rail's width. Fixed: it is a set of destinations, not a panel.
+    pub const RAIL_W: f32 = 64.0;
+
+    /// Command-bar and status-bar heights.
+    ///
+    /// Derived from [`TYPE_SCALE`] so they stay proportionate when the type grows — a fixed 46 px
+    /// bar that was right at 1.0 scale crops its own title at 1.2. The bars set these as an EXACT
+    /// height and centre their contents, which is what keeps the space above and below equal;
+    /// letting a panel size to its tallest child makes symmetric padding impossible.
+    pub const BAR_H: f32 = 40.0 * TYPE_SCALE;
+    pub const STATUS_H: f32 = 24.0 * TYPE_SCALE;
+
+    /// The frame shared by both bars: panel fill, horizontal breathing room, and NO vertical
+    /// margin — the vertical centring does that job, and a margin would fight it.
+    pub fn bar_frame() -> egui::Frame {
+        egui::Frame::none()
+            .fill(G1)
+            .inner_margin(egui::Margin { left: 12.0, right: 12.0, top: 0.0, bottom: 0.0 })
+    }
+
+    /// One rail destination: keycap, glyph, label, and a 2px meter of how much of that page's
+    /// subject is resolved.
+    ///
+    /// The meter is the reason the rail is more than four icons — it answers "how much of THAT is
+    /// accounted for?" without making you go and look. `total == 0` draws no meter at all, because
+    /// a page with nothing to resolve should not imply that it has work waiting.
+    pub fn rail_button(
+        ui: &mut egui::Ui,
+        key: &str,
+        glyph: &str,
+        label: &str,
+        selected: bool,
+        done: usize,
+        total: usize,
+    ) -> egui::Response {
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(RAIL_W, RAIL_W), egui::Sense::click());
+        let p = ui.painter();
+        let fg = if selected {
+            RED
+        } else if resp.hovered() {
+            DIM
+        } else {
+            FAINT
+        };
+        if selected {
+            p.rect_filled(rect, egui::Rounding::ZERO, RED_SOFT);
+            // the live marker: a red bar down the selected edge
+            let mut bar = rect;
+            bar.set_width(3.0);
+            p.rect_filled(bar.shrink2(egui::vec2(0.0, 7.0)), egui::Rounding::ZERO, RED);
+        } else if resp.hovered() {
+            p.rect_filled(rect, egui::Rounding::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 6));
+        }
+        // keycap, top-left
+        p.text(
+            rect.left_top() + egui::vec2(8.0, 6.0),
+            egui::Align2::LEFT_TOP,
+            key,
+            FontId::new(9.0, data()),
+            if selected { RED } else { FAINT },
+        );
+        // glyph + label, stacked and centred
+        p.text(
+            rect.center() - egui::vec2(0.0, 9.0),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            FontId::new(17.0, FontFamily::Proportional),
+            fg,
+        );
+        p.text(
+            rect.center() + egui::vec2(0.0, 10.0),
+            egui::Align2::CENTER_CENTER,
+            label.to_uppercase(),
+            FontId::new(9.0, disp()),
+            fg,
+        );
+        if total > 0 {
+            let m = egui::Rect::from_min_size(
+                rect.left_bottom() + egui::vec2(14.0, -9.0),
+                egui::vec2(RAIL_W - 28.0, 2.0),
+            );
+            meter_in(p, m, done, total);
+        }
+        resp
     }
 
     /// A small square status dot + label (the "READY" pill in the status bar).
     pub fn status_dot(ui: &mut egui::Ui, label: &str, color: Color32) {
         let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-        ui.painter().rect_filled(r, egui::Rounding::same(1.0), color);
+        ui.painter().rect_filled(r, egui::Rounding::ZERO, color);
         ui.add_space(2.0);
         ui.label(disp_text(label.to_uppercase(), 9.5, color));
     }
 
-    /// The command-bar diamond brand mark (a filled brass rhombus with a dark inner cut).
+    /// The brand mark: the **Cross of Lorraine** in resistance red — the emblem of the Free French
+    /// and of the Resistance this tool's subject belongs to. Replaces the Mercs2 brass diamond.
+    ///
+    /// Drawn to the heraldic proportion: a patriarchal cross has TWO crossbars with the upper one
+    /// SHORTER than the lower. (Reversing them gives a different cross entirely.)
     pub fn brand_mark(ui: &mut egui::Ui) {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
-        let c = rect.center() - egui::vec2(0.0, 1.5);
-        let diamond = |r: f32| {
-            vec![
-                c + egui::vec2(0.0, -r),
-                c + egui::vec2(r, 0.0),
-                c + egui::vec2(0.0, r),
-                c + egui::vec2(-r, 0.0),
-            ]
-        };
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 26.0), egui::Sense::hover());
+        let c = rect.center();
         let p = ui.painter();
-        p.add(egui::Shape::convex_polygon(diamond(11.0), BRASS, egui::Stroke::NONE));
-        p.add(egui::Shape::convex_polygon(diamond(7.0), G0, egui::Stroke::NONE));
-        p.add(egui::Shape::convex_polygon(diamond(3.2), BRASS, egui::Stroke::NONE));
+        let bar = |w: f32, h: f32, dy: f32| {
+            egui::Rect::from_center_size(c + egui::vec2(0.0, dy), egui::vec2(w, h))
+        };
+        // vertical, then the short upper crossbar, then the long lower one
+        p.rect_filled(bar(3.0, 24.0, 0.0), egui::Rounding::ZERO, RED);
+        p.rect_filled(bar(11.0, 3.0, -6.0), egui::Rounding::ZERO, RED);
+        p.rect_filled(bar(15.0, 3.0, 2.0), egui::Rounding::ZERO, RED);
     }
 }
 

@@ -11,6 +11,16 @@ use crate::havok::QsTransform;
 
 /// Local (bind-pose) matrix of a bone.
 fn bind_local(b: &Bone) -> Mat4 {
+    // An exact local wins over the TRS triple: see `Bone::local_m`.
+    if let Some(rm) = &b.local_m {
+        let mut cm = [0f32; 16];
+        for c in 0..4 {
+            for r in 0..4 {
+                cm[c * 4 + r] = rm[r * 4 + c];
+            }
+        }
+        return Mat4::from_cols_array(&cm);
+    }
     Mat4::from_scale_rotation_translation(
         Vec3::from_array(b.s),
         Quat::from_xyzw(b.r[0], b.r[1], b.r[2], b.r[3]),

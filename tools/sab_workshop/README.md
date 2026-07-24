@@ -1,10 +1,32 @@
 # sab_workshop
 
-A native **wgpu + egui** workshop for *The Saboteur* characters. It loads a merged skinned
-mesh + skeleton, resolves the character's **textures straight out of the game's megapack**,
-lists every animation clip in a searchable panel, decodes the selected clip on demand from
-`Animations.pack`, and plays it back **textured**, with **real-time GPU skinning** under an
-orbit camera.
+A native **wgpu + egui** modding workshop for *The Saboteur*. It has two halves:
+
+- **Inspect** (page 1) — the character/animation viewer: a merged skinned mesh + skeleton, textures
+  resolved straight out of the megapack, every clip searchable, decoded on demand from
+  `Animations.pack` and played back **textured** with real-time GPU skinning under an orbit camera.
+- **Templates · GameText · Icons** (pages 2–4) — the mod editor, built on the byte-verified
+  `sab_formats` codecs. See [The mod-editor pages](#the-mod-editor-pages) below.
+
+## The mod-editor pages
+
+Pages 2–4 replace the old Textures/Materials/Rig tabs with a data editor over the game's own files:
+
+- **Templates** — load a `GameTemplates.wsd` (AULB), search templates by name/type, and edit any
+  property pair. A 4-byte value shows as int / float / hash; known property names (`Name`, `Model`,
+  `Texture`, …) are resolved. Set a value as an int, float, raw hash, or **texture name** (which is
+  hashed with `pandemic_hash` — that is exactly how a template references a texture). Save writes the
+  file byte-faithfully.
+- **GameText** — load a `Cinematics/Dialog/<Lang>/GameText.dlg`, browse/search all UI strings and VO
+  subtitles, edit any string (any length), and **add a brand-new UI id** (keyed by
+  `pandemic_hash("File_Text.Key")` — no Lua registration needed). Save re-emits the container and
+  rebases its trailing `DNEC` section automatically.
+- **Icons** — scan a megapack for its DTEX texture names and their `pandemic_hash`, and hash any name
+  you plan to pack, so you can wire a custom icon into a template's texture value. (Packing the DTEX
+  itself is done with `sab_dtex` / `sab_pack`; the format chain is documented in
+  `../../docs/formats/gametext.md` and `../sab_gametemplates/GAMETEMPLATES_FORMAT.md`.)
+
+The original character/animation viewer is unchanged and is page 1.
 
 ![pipeline: load → resolve textures → decode-on-select → skin → render]
 
@@ -125,6 +147,8 @@ formats.rs     COPIED from tools/sab_havok65: read_smsh, read_skel, Bone, Smsh; 
                (Prim) and `submesh_cover` (the non-overlapping per-material draw list)
 dtex.rs        COPIED from tools/sab_dtex (parse/payload/mips/find_records) + BC1/BC2/BC3 and
                uncompressed decoders (BC1/BC3 from the Mercs2 workshop's texpng) → CpuTexture
+editor.rs      the mod-editor pages (Templates / GameText / Icons) over the sab_formats codecs;
+               each is a self-contained CentralPanel with a path field, Load/Save, and edit forms
 pack.rs        COPIED from tools/sab_pack: megapack index reader + pandemic_hash
 resolve.rs     character texture resolution: bundle sweep → DTEX records → role classify →
                body-part auto-seed → `<mesh>.materials.json` sidecar load/save
@@ -141,8 +165,37 @@ Data is right-handed, +Y up, metres (Havok/glTF) — the camera matches (`look_a
 - **Diffuse only.** The resolved `_N`/`_S`/`_WM` maps are listed and pickable but not yet used by
   the shader (no normal/spec lighting); textures are uploaded as `Rgba8Unorm` (no sRGB decode), to
   stay consistent with the flat/grid passes.
-- **The texture sweep blocks startup** (~1.4 s in release; the window is created first, so it is
-  briefly unresponsive). Not threaded yet. Debug builds are far slower — use `--release`.
+- **Startup is non-blocking and progressive.** The megapacks are **memory-mapped** (`open` is instant —
+  no 715 MB read, only touched pages fault in), and the heavy work runs on a **worker thread**
+  (`background_load`) that **streams results in stages** (`BgMsg`): clip list → model list → character
+  textures → megapacks (click-to-load) → `Animations.pack` (playback). The window is interactive at once
+  and each section fills in as it lands.
+- **The model list is near-instant.** `list_meshes` walks the **MSHA chain** — the mesh headers in a
+  bundle are contiguous (`next = pos + 276 + compSize0 + compSize1`), so it reads only the 276-byte
+  headers (~2 MB for all 6807 meshes) and skips every compressed blob. Verified bit-for-bit against the
+  old full-file scan (6807 == 6807 across 759 bundles).
+- **The character texture scan won't freeze the UI.** Finding the boot character's textures needs a
+  full-content token scan (the name lives deep in its bundle), so it can't be windowed — but it now
+  reads each sub-pack via a **buffered, reused-buffer file read** (`Megapack::read_into`) instead of
+  mmap-faulting all 714 MB into the working set, and **yields** periodically. It runs as the last
+  background stage. **Clicking a model** in the browser is the same: the mesh loads and shows instantly
+  (untextured), and its texture resolve — which for a character is that same whole-pack token scan —
+  runs on a worker (`resolve_model_textures`) and streams in, so a click never blocks the UI. Debug
+  builds are far slower at BC decode — use `--release`.
+
+## The model browser (assembled assets, from the game's own data)
+
+The Inspect navigator lists **assembled assets**, not raw mesh parts — and the grouping is the game's,
+not a heuristic. `src/assets.rs` reads `GameTemplates` and follows the real references:
+`FxHumanBodySetup` (a character) → `FxHumanHead` + `FxHumanBodyPart` → mesh; `Weapon` / `CAR` / `Prop` /
+`Ammo` reference their meshes directly. So the 6807 mesh parts fold into **979 assets** — Characters
+(268), Props (225), Weapons (155), Vehicles (100) — plus **Ungrouped** (231 meshes no template claims;
+never hidden). Proven: `FBS_RS_Sean` → FX, FM, HD, UB, LB, HAT, GR, Hair.
+
+- **Click an asset** → loads its primary part into the viewer and fills the right inspector's **Parts**
+  panel with every part; **click a part** to load/inspect it individually.
+- **Right-click an asset → Move to group** to override its category; saved to
+  `sab_workshop_model_groups.json` next to the game, winning over the template default on later runs.
 - The clip list re-parses the Havok packfile on each *selection* (cheap; it only resolves the
   object's `hkArray`s). Per-frame sampling does not re-parse.
 - The Havok decoder's multi-block path and non-THREECOMP40 rotation quantizations are present

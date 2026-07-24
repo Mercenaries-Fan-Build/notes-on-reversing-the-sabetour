@@ -39,17 +39,24 @@ pub struct Entry {
     pub offset: u64,
 }
 
-/// An opened megapack: the whole file in memory + its parsed index. Character texture bundles are a
-/// small fraction of the 715 MB Dynamic0, but the index is hash-only (no plaintext paths), so we
-/// scan bundle bytes for a character token rather than resolve names — see `find_textures`.
+/// An opened megapack: the file **memory-mapped** + its parsed index. Opening is instant — only the
+/// index (header + `count×20`) is touched up front; sub-pack bytes fault into RAM lazily as they are
+/// sliced. The index is hash-only (no plaintext paths), so texture bundles are found by scanning
+/// bundle bytes for a character token — but the mmap means we only pay for the bundles we look at.
 pub struct Megapack {
-    data: Vec<u8>,
+    data: memmap2::Mmap,
+    /// Kept for buffered, bounded-memory per-sub-pack reads (the big token scan) — avoids
+    /// mmap-faulting the whole 714 MB into the process working set. See `read_into`.
+    file: std::fs::File,
     entries: Vec<Entry>,
 }
 
 impl Megapack {
     pub fn open(path: &str) -> Result<Megapack, String> {
-        let data = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+        let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        // SAFETY: the game's megapacks are read-only assets we never mutate; a concurrent external
+        // truncation is the only UB risk and does not occur for installed game files.
+        let data = unsafe { memmap2::Mmap::map(&file).map_err(|e| format!("mmap {path}: {e}"))? };
         if data.len() < 8 || &data[0..4] != MAGIC {
             return Err(format!("not a megapack (magic {:02X?})", &data[0..4.min(data.len())]));
         }
@@ -68,15 +75,29 @@ impl Megapack {
             });
             p += 20;
         }
-        Ok(Megapack { data, entries })
+        Ok(Megapack { data, file, entries })
+    }
+
+    /// Read entry `e`'s sub-pack into `buf` via a positioned file read (no mmap fault), returning the
+    /// slice actually read. `buf` is reused across calls, so a full scan holds only ONE sub-pack in
+    /// memory (~tens of MB) instead of mapping the whole pack resident.
+    pub fn read_into<'b>(&self, e: &Entry, buf: &'b mut Vec<u8>) -> &'b [u8] {
+        use std::os::windows::fs::FileExt;
+        let n = e.size as usize;
+        if buf.len() < n {
+            buf.resize(n, 0);
+        }
+        match self.file.seek_read(&mut buf[..n], e.offset) {
+            Ok(got) => &buf[..got],
+            Err(_) => &[],
+        }
     }
 
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
-    /// The whole file. Needed by scanners that work on absolute file offsets rather than per-entry
-    /// slices (e.g. the `AHSM` model sweep in `meshload::list_meshes`).
+    /// The whole mapped file. Reading a region faults only that region in (lazy).
     pub fn raw(&self) -> &[u8] {
         &self.data
     }
@@ -85,6 +106,18 @@ impl Megapack {
     pub fn slice(&self, e: &Entry) -> &[u8] {
         let s = e.offset as usize;
         let end = s.saturating_add(e.size as usize).min(self.data.len());
+        if s >= self.data.len() || end <= s {
+            return &[];
+        }
+        &self.data[s..end]
+    }
+
+    /// The first `max` bytes of entry `e`'s sub-pack — enough to read its header (e.g. the `AHSM`
+    /// MSHA wrapper, which sits near the sub-pack start). Faults in only that window, not the whole
+    /// bundle: the earmark that lets `list_meshes` enumerate models without touching 715 MB.
+    pub fn window(&self, e: &Entry, max: usize) -> &[u8] {
+        let s = e.offset as usize;
+        let end = s.saturating_add((e.size as usize).min(max)).min(self.data.len());
         if s >= self.data.len() || end <= s {
             return &[];
         }

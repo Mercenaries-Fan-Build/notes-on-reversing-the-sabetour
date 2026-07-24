@@ -28,6 +28,12 @@ flate2 = "1"
 # OS clipboard for the inspector's copy actions — the hand-rolled egui bridge must deliver egui's
 # PlatformOutput.copied_text itself (egui-winit would normally do this). See src/gui.rs.
 arboard = "3"
+# Shared Saboteur format codecs for the mod-editor pages: GameText.dlg (Cinematics/Dialog/<Lang>)
+# and GameTemplates.wsd (AULB). Both byte-verified against retail. See src/editor.rs.
+sab_formats = { path = "../sab_formats" }
+# Memory-map the megapacks so opening a 715 MB pack is instant (no eager read) and only the sub-pack
+# headers / bundles actually touched fault into RAM — the index is the earmark. See src/pack.rs.
+memmap2 = "0.9"
 
 [profile.release]
 opt-level = 3

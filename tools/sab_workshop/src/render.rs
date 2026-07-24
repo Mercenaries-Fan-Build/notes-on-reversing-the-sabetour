@@ -69,6 +69,8 @@ pub struct Renderer {
 
     joint_count: usize,
     pub show_grid: bool,
+    /// Draw the 3D scene at all. False on the editor pages, which are not a 3D view.
+    pub draw_scene: bool,
     pub show_textures: bool,
 }
 
@@ -348,6 +350,7 @@ impl Renderer {
             grid_count,
             joint_count: jc,
             show_grid: true,
+            draw_scene: true,
             show_textures: true,
         })
     }
@@ -493,25 +496,30 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            if self.show_grid {
-                pass.set_pipeline(&self.grid_pipeline);
-                pass.set_vertex_buffer(0, self.grid_vbo.slice(..));
-                pass.draw(0..self.grid_count, 0..1);
-            }
-            pass.set_pipeline(&self.mesh_pipeline);
-            pass.set_vertex_buffer(0, self.vbo.slice(..));
-            pass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint32);
-            // One draw per submesh, each with its own diffuse (or the white fallback). When textures
-            // are toggled off, everything binds white → the original flat-lit look.
-            for (i, sm) in self.submeshes.iter().enumerate() {
-                let bg = match (self.show_textures, &self.submesh_bg[i]) {
-                    (true, Some(b)) => b,
-                    _ => &self.white_bg,
-                };
-                pass.set_bind_group(1, bg, &[]);
-                let end = sm.index_start + sm.index_count;
-                pass.draw_indexed(sm.index_start..end, 0, 0..1);
+            // The editor pages are not a 3D view: drawing the character behind them costs a full
+            // scene pass every frame AND shows through anywhere egui does not paint, which reads as
+            // a rendering bug. The clear still runs, so the ground under the panels is the theme's.
+            if self.draw_scene {
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                if self.show_grid {
+                    pass.set_pipeline(&self.grid_pipeline);
+                    pass.set_vertex_buffer(0, self.grid_vbo.slice(..));
+                    pass.draw(0..self.grid_count, 0..1);
+                }
+                pass.set_pipeline(&self.mesh_pipeline);
+                pass.set_vertex_buffer(0, self.vbo.slice(..));
+                pass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint32);
+                // One draw per submesh, each with its own diffuse (or the white fallback). When
+                // textures are toggled off, everything binds white → the original flat-lit look.
+                for (i, sm) in self.submeshes.iter().enumerate() {
+                    let bg = match (self.show_textures, &self.submesh_bg[i]) {
+                        (true, Some(b)) => b,
+                        _ => &self.white_bg,
+                    };
+                    pass.set_bind_group(1, bg, &[]);
+                    let end = sm.index_start + sm.index_count;
+                    pass.draw_indexed(sm.index_start..end, 0, 0..1);
+                }
             }
         }
         gui.paint(&self.device, &self.queue, &mut encoder, &view, self.size());

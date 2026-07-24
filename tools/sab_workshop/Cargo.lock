@@ -1034,6 +1034,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mercs2_formats"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d40e50f1224ae8088933d8f3eecc3d91cc84c0d35532264f673eccfa2912c9"
+dependencies = [
+ "flate2",
+]
+
+[[package]]
 name = "metal"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1533,6 +1542,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "sab_formats"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "mercs2_formats",
+]
+
+[[package]]
 name = "sab_workshop"
 version = "0.1.0"
 dependencies = [
@@ -1542,7 +1559,9 @@ dependencies = [
  "egui-wgpu",
  "flate2",
  "glam",
+ "memmap2",
  "pollster",
+ "sab_formats",
  "serde",
  "serde_json",
  "wgpu",
