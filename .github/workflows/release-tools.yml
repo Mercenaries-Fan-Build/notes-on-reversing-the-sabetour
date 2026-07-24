@@ -1,0 +1,232 @@
+# Build the Saboteur modding toolset (tools/sab_*) into Windows binaries and publish them.
+#
+# Why Windows-only: every consumer is a Saboteur (2009) modder on a Windows install, sab_workshop
+# renders through wgpu/D3D12, and sab_asi is an x86 DLL injected into a 32-bit Win32 game. A Linux
+# build would compile but has nobody to serve.
+#
+# Layout note: tools/sab_* are INDEPENDENT crates (no cargo workspace), each with its own committed
+# Cargo.lock. So every crate is built by --manifest-path with --locked, discovered dynamically —
+# a new tools/sab_<thing> ships in the next release with no edit here (see $skip below).
+
+name: Build & release modding tools
+
+on:
+  push:
+    branches: [main]
+    tags: ['tools-v*', 'v*']
+  pull_request:
+    paths:
+      - 'tools/sab_*/**'
+      - '.github/workflows/release-tools.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Publish a release under this tag (blank = build artifacts only, no release)'
+        required: false
+        type: string
+      prerelease:
+        description: 'Mark the release as a pre-release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # needed to create the release; nothing else is written
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failed release build should be loud, not silently missing a tool.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build (windows-x64)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + i686 target for sab_asi)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # sab_asi is a cdylib injected into Saboteur.exe, which is 32-bit. It MUST be i686.
+          targets: i686-pc-windows-msvc
+
+      # Only the registry is cached, not the target dirs: a release build of sab_workshop's wgpu
+      # tree is >1 GB, which costs more to upload/restore than it saves in compile time.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('tools/sab_*/Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = ''
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $tag = $env:GITHUB_REF_NAME
+          } elseif ('${{ inputs.tag }}' -ne '') {
+            $tag = '${{ inputs.tag }}'
+          }
+          if ($tag -ne '') {
+            # tools-v1.2.0 / v1.2.0 -> 1.2.0
+            $version = $tag -replace '^(tools-)?v', ''
+          } else {
+            $version = "dev-$($env:GITHUB_SHA.Substring(0,8))"
+          }
+          "tag=$tag"          | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version"  | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "name=saboteur-modding-tools-$version-win64" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "tag='$tag' version='$version'"
+
+      - name: Build CLI tools + workshop
+        id: build
+        shell: pwsh
+        run: |
+          # Not shipped to modders:
+          #   sab_formats       - a library; it has no binary and rides along inside its dependents
+          #   sab_poc           - self-described temporary POC bundle, not a stable tool
+          #   sab_megapack_key  - a one-shot proof of the index-key derivation, not a workflow tool
+          #   sab_asi           - built separately below (different target arch)
+          $skip = @('sab_formats', 'sab_poc', 'sab_megapack_key', 'sab_asi')
+
+          $crates = @(Get-ChildItem tools -Directory -Filter 'sab_*' |
+            Where-Object { (Test-Path (Join-Path $_.FullName 'Cargo.toml')) -and $skip -notcontains $_.Name } |
+            Sort-Object Name)
+          if ($crates.Count -eq 0) { throw 'no sab_* crates found — did the tools/ layout move?' }
+          Write-Host "Building $($crates.Count) crates: $($crates.Name -join ', ')"
+
+          $failed = @()
+          foreach ($c in $crates) {
+            Write-Host "::group::cargo build --release $($c.Name)"
+            cargo build --release --locked --manifest-path "tools/$($c.Name)/Cargo.toml"
+            if ($LASTEXITCODE -ne 0) { $failed += $c.Name }
+            Write-Host '::endgroup::'
+          }
+          if ($failed.Count -gt 0) { throw "build failed: $($failed -join ', ')" }
+
+          # Hand the exact list to the staging step, so a stale target/ dir from a skipped crate
+          # can never sneak an unintended binary into the release.
+          "crates=$($crates.Name -join ',')" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build sab_asi (x86 injected DLL)
+        shell: pwsh
+        run: |
+          cargo build --release --locked --target i686-pc-windows-msvc --manifest-path tools/sab_asi/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'sab_asi build failed' }
+
+      - name: Stage the bundle
+        id: stage
+        shell: pwsh
+        run: |
+          $name = '${{ steps.ver.outputs.name }}'
+          $root = "dist/$name"
+          New-Item -ItemType Directory -Force -Path "$root/docs", "$root/licenses", "$root/sab_asi", 'dist/pdb' | Out-Null
+
+          # Final binaries sit directly in target/release (per-crate, since there is no workspace);
+          # intermediate artifacts live in target/release/deps, so a top-level *.exe glob is exact.
+          $tools = @()
+          foreach ($crate in ('${{ steps.build.outputs.crates }}' -split ',')) {
+            $rel = "tools/$crate/target/release"
+            $exes = @(Get-ChildItem $rel -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+            if ($exes.Count -eq 0) { throw "$crate built but produced no .exe in $rel" }
+            foreach ($exe in $exes) {
+              Copy-Item $exe.FullName $root
+              $tools += $exe.BaseName
+              $pdb = Join-Path $rel "$($exe.BaseName).pdb"
+              if (Test-Path $pdb) { Copy-Item $pdb 'dist/pdb' }
+            }
+            # Each tool's own README is its manual — ship it next to the binary.
+            $readme = "tools/$crate/README.md"
+            if (Test-Path $readme) { Copy-Item $readme "$root/docs/$crate.md" }
+          }
+          if ($tools.Count -eq 0) { throw 'nothing was staged — the build step produced no .exe' }
+
+          $asi = 'tools/sab_asi/target/i686-pc-windows-msvc/release/sab_asi.dll'
+          if (-not (Test-Path $asi)) { throw "missing $asi" }
+          Copy-Item $asi "$root/sab_asi"
+          if (Test-Path 'tools/sab_asi/README.md') { Copy-Item 'tools/sab_asi/README.md' "$root/sab_asi/README.md" }
+          $asiPdb = 'tools/sab_asi/target/i686-pc-windows-msvc/release/sab_asi.pdb'
+          if (Test-Path $asiPdb) { Copy-Item $asiPdb 'dist/pdb' }
+
+          Copy-Item 'LICENSE' $root
+          # sab_workshop embeds the Oswald font via include_bytes!; the OFL requires the license
+          # to travel with the binary that carries the glyphs.
+          if (Test-Path 'tools/sab_workshop/assets/fonts/OFL.txt') {
+            Copy-Item 'tools/sab_workshop/assets/fonts/OFL.txt' "$root/licenses/Oswald-OFL.txt"
+          }
+
+          $lines = @(
+            "The Saboteur (2009) modding tools - ${{ steps.ver.outputs.version }}"
+            "commit ${{ github.sha }}"
+            ''
+            'Windows x64 command-line tools, except sab_asi/sab_asi.dll which is 32-bit'
+            'because it is injected into the 32-bit Saboteur.exe.'
+            ''
+            'Every tool prints its usage when run with no arguments. Per-tool manuals are in docs/.'
+            ''
+            'Included:'
+          ) + ($tools | Sort-Object | ForEach-Object { "  $_.exe" }) + @(
+            '  sab_asi/sab_asi.dll   (injected engine SDK - see sab_asi/README.md)'
+            ''
+            'sab_workshop.exe is the GUI: character/animation viewer plus the mod-editor pages.'
+            'sab_validator.exe checks a mod the way the engine mount path would parse it.'
+            ''
+            'These tools ship no game data. You need your own copy of The Saboteur.'
+          )
+          $lines | Set-Content "$root/README.txt" -Encoding utf8
+
+          # Archive the directory itself, so extracting yields one named folder rather than
+          # dumping 14 loose exes into whatever folder the user unzipped from.
+          Compress-Archive -Path $root -DestinationPath "dist/$name.zip"
+          # The workshop is the headline tool; publish it standalone so nobody has to pull 14 binaries.
+          Compress-Archive -Path "$root/sab_workshop.exe", "$root/README.txt", "$root/LICENSE", "$root/licenses" `
+                           -DestinationPath "dist/sab_workshop-${{ steps.ver.outputs.version }}-win64.zip"
+          if (Test-Path 'dist/pdb/*') {
+            Compress-Archive -Path 'dist/pdb/*' -DestinationPath "dist/$name-pdb.zip"
+          }
+
+          Get-FileHash dist/*.zip -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content 'dist/SHA256SUMS.txt' -Encoding utf8
+          Get-Content 'dist/SHA256SUMS.txt' | Write-Host
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release
+        if: steps.ver.outputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Modding tools ${{ steps.ver.outputs.version }}
+          prerelease: ${{ inputs.prerelease == true }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          body: |
+            Windows x64 build of the Saboteur modding toolset, from `${{ github.sha }}`.
+
+            | Download | What it is |
+            |---|---|
+            | `saboteur-modding-tools-${{ steps.ver.outputs.version }}-win64.zip` | Everything: the workshop GUI, the validator, and every format CLI, plus per-tool docs |
+            | `sab_workshop-${{ steps.ver.outputs.version }}-win64.zip` | The workshop GUI on its own |
+            | `...-pdb.zip` | Debug symbols, for turning a crash into a useful report |
+
+            `sab_asi.dll` inside the full bundle is **32-bit** on purpose — it is injected into the
+            32-bit `Saboteur.exe`. Everything else is 64-bit.
+
+            No game data is included; these operate on your own installation.
