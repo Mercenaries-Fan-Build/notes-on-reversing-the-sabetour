@@ -240,16 +240,23 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn new(game_dir: &str) -> Self {
+    /// `lang`, `slot` and `mod_name` come from the user's persisted settings — the Strings page opens
+    /// on the configured language rather than always English, and publish targets the chosen DLC slot.
+    pub fn new(game_dir: &str, lang: usize, slot: &str, mod_name: &str) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut e = Editor {
             md: Mod {
-                name: "untitled_mod".into(),
+                name: mod_name.to_string(),
                 game_dir: game_dir.trim_end_matches(['/', '\\']).to_string(),
-                slot: "02".into(),
+                slot: slot.to_string(),
             },
             changes: Vec::new(),
-            strings: StringsState { filter_ui: true, filter_vo: true, ..Default::default() },
+            strings: StringsState {
+                filter_ui: true,
+                filter_vo: true,
+                lang: lang.min(LANGS.len() - 1),
+                ..Default::default()
+            },
             objects: ObjectsState::default(),
             icons: IconsState::default(),
             thumbs: Thumbs::default(),

@@ -187,14 +187,18 @@ pub fn run(cfg: Config) {
     let mut lock_root = true;
     let mut nav_tab = NavTab::Models;
     let mut page = Page::Inspect;
-    // The mod-editor pages (Templates / GameText / Icons). Default file paths derive from the game
-    // dir (two levels up from the megapack, e.g. …/The Saboteur/Global/Dynamic0.megapack).
-    let game_dir = std::path::Path::new(&cfg.megapack)
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| "C:/GOG Games/The Saboteur".into());
-    let mut editor_state = crate::editor::Editor::new(&game_dir);
+    // The mod-editor pages (Templates / GameText / Icons). Every game-side path comes from the one
+    // configured install root (Settings page), not from unwinding a megapack path.
+    let game_dir = cfg.game_dir.clone();
+    let mut editor_state =
+        crate::editor::Editor::new(&game_dir, cfg.settings.lang, &cfg.settings.dlc_slot, &cfg.settings.mod_name);
+    // The Settings page edits a COPY; the running app keeps using what it booted with until restart.
+    let mut settings_ctx = SettingsCtx {
+        dir_edit: cfg.settings.game_dir.clone(),
+        launched_with: cfg.settings.game_dir.clone(),
+        s: cfg.settings.clone(),
+        note: None,
+    };
     // Model-browser groupings (rule-based + user overrides saved next to the game) and the
     // right-click "move to group" request applied after each UI pass.
     let mut groups = crate::models::Groups::load(&game_dir);
@@ -370,6 +374,7 @@ pub fn run(cfg: Config) {
                                 models_loading,
                             },
                             &mut editor_state,
+                            &mut settings_ctx,
                         );
                     });
 
@@ -735,11 +740,7 @@ fn background_load(cfg: Config, submeshes: Vec<SubMesh>, tx: std::sync::mpsc::Se
     };
     let mesh_list = megapack.as_ref().map(meshload::list_meshes).unwrap_or_default();
     // Assemble assets from the game's own GameTemplates (FxHumanBodySetup / Weapon / CAR / Prop …).
-    let game_dir = std::path::Path::new(&cfg.megapack)
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
+    let game_dir = cfg.game_dir.clone();
     let assets = match crate::assets::load_gametemplates(&game_dir) {
         Some(gt) => crate::assets::build(&gt, &mesh_list),
         None => {
@@ -814,11 +815,7 @@ pub fn texcheck(cfg: Config, filter: &str) -> i32 {
         }
     };
     let mesh_list = meshload::list_meshes(&mp);
-    let game_dir = std::path::Path::new(&cfg.megapack)
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
+    let game_dir = cfg.game_dir.clone();
     let assets = match crate::assets::load_gametemplates(&game_dir) {
         Some(gt) => crate::assets::build(&gt, &mesh_list),
         None => crate::assets::build_flat(&mesh_list),
@@ -1127,9 +1124,7 @@ pub fn selftest(cfg: Config, n: usize) -> i32 {
     // Model list via the fast MSHA chain-walk, then assemble assets from GameTemplates + count them.
     if let Ok(mp) = pack::Megapack::open(&cfg.megapack) {
         let list = meshload::list_meshes(&mp);
-        let game_dir = std::path::Path::new(&cfg.megapack)
-            .parent().and_then(|p| p.parent())
-            .map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        let game_dir = cfg.game_dir.clone();
         let assets = match crate::assets::load_gametemplates(&game_dir) {
             Some(gt) => crate::assets::build(&gt, &list),
             None => { println!("selftest: GameTemplates not found — flat fallback"); crate::assets::build_flat(&list) }
@@ -1395,16 +1390,20 @@ enum Page {
     Objects,
     /// Browse the texture pool as pictures, and wire one into an object property.
     Icons,
+    /// Where the game is installed, and the defaults every other page starts from.
+    Settings,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::Inspect, Page::Strings, Page::Objects, Page::Icons];
+    const ALL: [Page; 5] =
+        [Page::Inspect, Page::Strings, Page::Objects, Page::Icons, Page::Settings];
     fn label(self) -> &'static str {
         match self {
             Page::Inspect => "inspect",
             Page::Strings => "strings",
             Page::Objects => "objects",
             Page::Icons => "icons",
+            Page::Settings => "settings",
         }
     }
     fn glyph(self) -> &'static str {
@@ -1413,25 +1412,28 @@ impl Page {
             Page::Strings => "¶",
             Page::Objects => "▤",
             Page::Icons => "▦",
+            Page::Settings => "⚙",
         }
     }
-    /// The editor page this maps to, or `None` for Inspect (the wgpu viewer).
+    /// The editor page this maps to, or `None` for the pages that are not editor views
+    /// (Inspect is the wgpu viewer; Settings is app configuration).
     fn editor(self) -> Option<crate::editor::EdPage> {
         use crate::editor::EdPage;
         match self {
-            Page::Inspect => None,
+            Page::Inspect | Page::Settings => None,
             Page::Strings => Some(EdPage::Strings),
             Page::Objects => Some(EdPage::Objects),
             Page::Icons => Some(EdPage::Icons),
         }
     }
-    /// The 1-4 shortcut that selects this page.
+    /// The 1-5 shortcut that selects this page.
     fn key(self) -> egui::Key {
         match self {
             Page::Inspect => egui::Key::Num1,
             Page::Strings => egui::Key::Num2,
             Page::Objects => egui::Key::Num3,
             Page::Icons => egui::Key::Num4,
+            Page::Settings => egui::Key::Num5,
         }
     }
 }
@@ -1497,6 +1499,182 @@ struct NavCtx<'a> {
     models_loading: bool,
 }
 
+/// Live state for the Settings page: the values being edited, plus what changing them implies.
+pub struct SettingsCtx {
+    pub s: crate::settings::Settings,
+    /// The install path as typed. Kept separate from `s.game_dir` so a half-typed path does not
+    /// re-run the existence checks against nonsense on every keystroke — it commits on Apply.
+    pub dir_edit: String,
+    /// The install `s` was launched with. Changing the install cannot take effect in place (the
+    /// megapacks are mmapped and every derived index is built from them at boot), so we compare
+    /// against this to decide whether to say "restart to apply".
+    pub launched_with: String,
+    pub note: Option<(String, bool)>, // (message, is_error)
+}
+
+/// The Settings page. One column of labelled groups; nothing here is a mod edit, so nothing here
+/// touches the changelist or the DLC overlay.
+fn settings_page(ctx: &egui::Context, sx: &mut SettingsCtx) {
+    egui::CentralPanel::default().show(ctx, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.set_max_width(720.0);
+            ui.add_space(8.0);
+            ui.label(theme::poster_text("SETTINGS", 22.0, theme::TX));
+            ui.label(theme::data_text(
+                &format!("stored at {}", crate::settings::settings_path().display()),
+                10.0,
+                theme::FAINT,
+            ));
+            ui.add_space(14.0);
+
+            // ---- game install ----
+            theme::eyebrow(ui, "Game install");
+            ui.label(theme::data_text(
+                "Everything the workshop reads comes from this folder. It is opened READ-ONLY; mods publish to a DLC overlay inside it.",
+                11.0,
+                theme::DIM,
+            ));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut sx.dir_edit)
+                        .desired_width(430.0)
+                        .hint_text("C:/GOG Games/The Saboteur"),
+                );
+                if ui.button("Detect").clicked() {
+                    match crate::settings::detect_install() {
+                        Some(d) => {
+                            sx.dir_edit = d;
+                            sx.note = Some(("Found an install.".into(), false));
+                        }
+                        None => {
+                            sx.note = Some((
+                                "No install found in the usual GOG/Steam locations — paste the path.".into(),
+                                true,
+                            ));
+                        }
+                    }
+                }
+            });
+
+            // Validate what is TYPED, so the checklist reacts before committing.
+            let probe = crate::settings::Settings { game_dir: sx.dir_edit.replace('\\', "/"), ..sx.s.clone() };
+            ui.add_space(8.0);
+            for c in probe.check() {
+                ui.horizontal(|ui| {
+                    let (mark, col) = match (c.ok, c.required) {
+                        (true, _) => ("✓", theme::COLD),
+                        (false, true) => ("✕", theme::RED),
+                        (false, false) => ("–", theme::FAINT),
+                    };
+                    ui.label(theme::data_text(mark, 12.0, col));
+                    ui.label(theme::data_text(c.label, 11.0, if c.ok { theme::TX } else { theme::DIM }));
+                    ui.label(theme::data_text(&c.rel, 10.0, theme::FAINT));
+                    if !c.ok && !c.required {
+                        ui.label(theme::data_text("(optional — one feature degrades)", 10.0, theme::FAINT));
+                    }
+                });
+            }
+
+            ui.add_space(12.0);
+            theme::eyebrow(ui, "Defaults");
+            egui::Grid::new("settings_defaults").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                ui.label(theme::data_text("Language", 11.0, theme::DIM));
+                egui::ComboBox::from_id_source("set_lang")
+                    .selected_text(crate::settings::LANG_NAMES[sx.s.lang].1)
+                    .show_ui(ui, |ui| {
+                        for (i, (_, name)) in crate::settings::LANG_NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut sx.s.lang, i, *name);
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(theme::data_text("Mod name", 11.0, theme::DIM));
+                ui.add(egui::TextEdit::singleline(&mut sx.s.mod_name).desired_width(240.0));
+                ui.end_row();
+
+                ui.label(theme::data_text("Publish to", 11.0, theme::DIM));
+                ui.horizontal(|ui| {
+                    ui.label(theme::data_text("DLC/", 11.0, theme::FAINT));
+                    ui.add(egui::TextEdit::singleline(&mut sx.s.dlc_slot).desired_width(48.0));
+                    ui.label(theme::data_text(
+                        "01 is the game's own overlay — do not publish into it",
+                        10.0,
+                        theme::FAINT,
+                    ));
+                });
+                ui.end_row();
+            });
+
+            ui.add_space(12.0);
+            theme::eyebrow(ui, "Appearance");
+            ui.horizontal(|ui| {
+                ui.label(theme::data_text("Type scale", 11.0, theme::DIM));
+                if ui
+                    .add(egui::Slider::new(&mut sx.s.type_scale, 0.8..=2.0).step_by(0.05).show_value(true))
+                    .changed()
+                {
+                    // Applies live: set the scale, then re-install so egui's cached TextStyle table
+                    // picks up the new sizes too.
+                    theme::set_type_scale(sx.s.type_scale);
+                    theme::install(ctx);
+                }
+            });
+            ui.label(theme::data_text(
+                "Scales every voice together, so the hierarchy between them is preserved.",
+                10.0,
+                theme::FAINT,
+            ));
+
+            // ---- apply ----
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+            let typed = sx.dir_edit.replace('\\', "/");
+            let typed = typed.trim_end_matches('/').to_string();
+            let dir_changed = typed != sx.s.game_dir;
+            ui.horizontal(|ui| {
+                if ui.button("Save settings").clicked() {
+                    sx.s.game_dir = typed.clone();
+                    sx.s.clamp();
+                    sx.dir_edit = sx.s.game_dir.clone();
+                    theme::set_type_scale(sx.s.type_scale);
+                    theme::install(ctx);
+                    sx.note = match sx.s.save() {
+                        Ok(()) => Some(("Saved.".into(), false)),
+                        Err(e) => Some((e, true)),
+                    };
+                }
+                if ui.button("Revert").clicked() {
+                    sx.s = crate::settings::Settings::load();
+                    sx.dir_edit = sx.s.game_dir.clone();
+                    theme::set_type_scale(sx.s.type_scale);
+                    theme::install(ctx);
+                    sx.note = Some(("Reloaded from disk.".into(), false));
+                }
+            });
+
+            if let Some((msg, err)) = &sx.note {
+                ui.add_space(6.0);
+                ui.label(theme::data_text(msg, 11.0, if *err { theme::RED } else { theme::COLD }));
+            }
+
+            // The install cannot be swapped in place: the megapacks are mmapped at boot and the model
+            // list, asset tree and editor document are all built from them. Say so plainly rather
+            // than half-reloading and leaving stale indices behind.
+            if sx.s.game_dir != sx.launched_with || dir_changed {
+                ui.add_space(8.0);
+                ui.label(theme::data_text(
+                    "Restart the workshop to load from the new install.",
+                    11.0,
+                    theme::EMBER,
+                ));
+            }
+            ui.add_space(20.0);
+        });
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_ui(
     ctx: &egui::Context,
@@ -1520,6 +1698,7 @@ fn build_ui(
     mats: &mut MatsCtx,
     nav: &mut NavCtx,
     ed: &mut crate::editor::Editor,
+    settings: &mut SettingsCtx,
 ) {
     // How much of each page's subject is accounted for. Only Materials is strictly work-remaining
     // (a binding is a decision you make); the rest are coverage. Both answer the same question —
@@ -1555,7 +1734,7 @@ fn build_ui(
     // above and 13 px below. Pinning the height and centring makes the spacing symmetric by
     // construction, at any type scale.
     egui::TopBottomPanel::top("cmdbar")
-        .exact_height(theme::BAR_H)
+        .exact_height(theme::bar_h())
         .frame(theme::bar_frame())
         .show(ctx, |ui| {
         // `horizontal_centered` lays out left-to-right AND takes the panel's full height, so every
@@ -1612,7 +1791,7 @@ fn build_ui(
 
     // ── STATUS BAR ──
     egui::TopBottomPanel::bottom("status")
-        .exact_height(theme::STATUS_H)
+        .exact_height(theme::status_h())
         .frame(theme::bar_frame())
         .show(ctx, |ui| {
         // `horizontal_centered` lays out left-to-right AND takes the panel's full height, so every
@@ -1700,6 +1879,14 @@ fn build_ui(
                 r.on_hover_text(format!("{}  ({})", p.label(), note));
             }
         });
+
+    // ── SETTINGS ──
+    // A single column, not the three-column shell: there is no navigator (nothing to browse) and no
+    // changelist (these are app preferences, not mod edits — they do not publish).
+    if *page == Page::Settings {
+        settings_page(ctx, settings);
+        return;
+    }
 
     // ── EDITOR PAGES ──
     // Same three-column shell as Inspect — navigator, work surface, right rail — because these are

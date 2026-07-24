@@ -23,12 +23,17 @@ mod models;
 mod pack;
 mod render;
 mod resolve;
+mod settings;
 mod skinning;
 mod wsao;
 
 /// Resolved input paths (CLI overrides the built-in defaults).
 #[derive(Clone)]
 pub struct Config {
+    /// The game install root. Every game-side path below is DERIVED from this (see `settings.rs`);
+    /// it is carried here as a first-class field so nothing has to recover it by walking parents up
+    /// from a megapack path, which is how it used to work in four separate places.
+    pub game_dir: String,
     pub mesh: String,
     pub skel: String,
     pub index: String,
@@ -39,26 +44,38 @@ pub struct Config {
     pub char_token: String,
     /// The shared palette archive — props/vehicles keep their skins here rather than beside the mesh.
     pub palettes: String,
-    /// Optional WSAO material library (`France.materials`). When set, textures resolve the engine's way
-    /// (submesh material hash → material record → texture hashes) instead of the name heuristic.
+    /// WSAO material library (`France.materials`) — the engine's material hash → texture binding.
+    /// Defaults to the one in `game_dir`; `--wsao` overrides it.
     pub wsao: Option<String>,
     /// Directory of loose `<hash>.dtex` files (from `sab_poc mattias`) to load WSAO-resolved textures from.
     pub dtex_dir: Option<String>,
+    /// User settings (install location, default language, output slot, type scale).
+    pub settings: crate::settings::Settings,
+}
+
+impl Config {
+    /// Build a config from persisted settings, deriving every game-side path from the one root.
+    pub fn from_settings(s: crate::settings::Settings) -> Config {
+        let out = "c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output";
+        Config {
+            game_dir: s.game_dir.clone(),
+            mesh: format!("{out}/skeletons/sean_full.smsh"),
+            skel: format!("{out}/skeletons/CH_AL_SeanDevlin.skel"),
+            index: format!("{out}/anim_bone_map.json"),
+            pack: s.anim_pack(),
+            megapack: s.megapack(),
+            char_token: "SeanDevlinn".into(),
+            palettes: s.palettes(),
+            wsao: Some(s.wsao()),
+            dtex_dir: None,
+            settings: s,
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
-            mesh: "c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output/skeletons/sean_full.smsh".into(),
-            skel: "c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output/skeletons/CH_AL_SeanDevlin.skel".into(),
-            index: "c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output/anim_bone_map.json".into(),
-            pack: "C:/GOG Games/The Saboteur/Animations.pack".into(),
-            megapack: "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack".into(),
-            char_token: "SeanDevlinn".into(),
-            palettes: "C:/GOG Games/The Saboteur/Global/Palettes0.megapack".into(),
-            wsao: None,
-            dtex_dir: None,
-        }
+        Config::from_settings(crate::settings::Settings::load())
     }
 }
 
@@ -71,7 +88,14 @@ fn main() {
     let get = |flag: &str| {
         args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
     };
-    let mut cfg = Config::default();
+    // Settings supply the defaults; the flags below override for a one-off run WITHOUT persisting,
+    // so scripting against another install never rewrites what the user chose in the UI.
+    let mut settings = crate::settings::Settings::load();
+    if let Some(v) = get("--game") {
+        settings.game_dir = v;
+        settings.clamp();
+    }
+    let mut cfg = Config::from_settings(settings);
     if let Some(v) = get("--mesh") { cfg.mesh = v; }
     if let Some(v) = get("--skel") { cfg.skel = v; }
     if let Some(v) = get("--index") { cfg.index = v; }

@@ -1,6 +1,6 @@
 //! In-app MESH extraction — browse and load any skinned model straight out of a megapack.
 //!
-//! PORTED from `tools/sab_mesh` (the validated extractor; see its `MESH_GEOMETRY_FORMAT.md`), with
+//! PORTED from `tools/sab_mesh` (the validated extractor; see `docs/formats/mesh_geometry.md`), with
 //! the CLI / glTF / SMSH writers stripped and its bespoke Mat4 replaced by glam (the skinning
 //! convention is column-vector `world[i] = world[parent] * local[i]`, and `Bone::inv_bind` is stored
 //! ROW-MAJOR — see `skinning`). Do not re-derive these offsets.
@@ -208,7 +208,7 @@ struct MeshTail {
     draws: Vec<DrawCall>,
 }
 
-/// MESH header + skeleton + tail. Offsets per `sab_mesh` / `MESH_GEOMETRY_FORMAT.md`.
+/// MESH header + skeleton + tail. Offsets per `sab_mesh` / `docs/formats/mesh_geometry.md`.
 fn parse_mesh(body: &[u8]) -> Result<MeshTail, String> {
     if body.len() < 244 {
         return Err("MESH body too short".into());
@@ -587,8 +587,9 @@ mod bbox_tests {
                 eprintln!("skip: {path} not present");
                 continue;
             }
-            let buf = std::fs::read(&path).unwrap();
-            let list = list_meshes(&buf);
+            let pack = crate::pack::Megapack::open(&path).expect("open megapack");
+            let list = list_meshes(&pack);
+            let buf = pack.raw();
             eprintln!("\n=== {pk} ===");
             for part in parts {
                 let Some(e) = list.iter().find(|e| e.name.eq_ignore_ascii_case(part)) else {
@@ -632,7 +633,7 @@ mod tests {
 
     /// Against the REAL install: list models in Dynamic0 and load Sean's `_GR` part, checking it
     /// reproduces what `sab_mesh` wrote into `output/skeletons/parts/sean_GR.smsh`
-    /// (3389 verts / 10044 indices / 5 prims, per MESH_GEOMETRY_FORMAT.md).
+    /// (3389 verts / 10044 indices / 5 prims, per docs/formats/mesh_geometry.md).
     #[test]
     fn load_sean_gr_from_megapack() {
         let mp = "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack";
@@ -640,8 +641,9 @@ mod tests {
             eprintln!("skip: {mp} not present");
             return;
         }
-        let buf = std::fs::read(mp).expect("read megapack");
-        let list = list_meshes(&buf);
+        let pack = crate::pack::Megapack::open(mp).expect("open megapack");
+        let list = list_meshes(&pack);
+        let buf = pack.raw();
         eprintln!("listed {} models", list.len());
         assert!(list.len() > 10, "expected many models");
         let e = list
@@ -687,10 +689,11 @@ mod hat_tests {
             eprintln!("skip: no megapack");
             return;
         }
-        let buf = std::fs::read(mp).unwrap();
-        let list = list_meshes(&buf);
+        let pack = crate::pack::Megapack::open(mp).expect("open megapack");
+        let list = list_meshes(&pack);
+        let buf = pack.raw();
         for e in list.iter().filter(|e| e.name.to_ascii_lowercase().contains("seandevlin")) {
-            let Ok(lm) = load(&buf, e) else { continue };
+            let Ok(lm) = load(buf, e) else { continue };
             let skinned = lm
                 .mesh
                 .weights

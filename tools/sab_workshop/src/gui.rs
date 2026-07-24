@@ -399,7 +399,7 @@ pub mod theme {
         let mut style = (*ctx.style()).clone();
         // Same scale as the text helpers, so egui's own widgets (buttons, text fields, tooltips)
         // never drift out of step with the theme's labels.
-        let sc = |pt: f32| pt * TYPE_SCALE;
+        let sc = |pt: f32| pt * type_scale();
         style.text_styles.insert(TextStyle::Heading, FontId::new(sc(20.0), poster()));
         style.text_styles.insert(TextStyle::Body, FontId::new(sc(13.0), FontFamily::Proportional));
         style.text_styles.insert(TextStyle::Button, FontId::new(sc(13.0), FontFamily::Proportional));
@@ -456,7 +456,24 @@ pub mod theme {
     /// Global type scale. Every size in the theme — the `TextStyle` scale in [`install`] and the
     /// three text helpers — is multiplied by this, so the whole system grows together and the
     /// hierarchy between voices is preserved. Change this, not individual call sites.
-    pub const TYPE_SCALE: f32 = 1.2;
+    ///
+    /// Runtime-settable from the Settings page. It is read on nearly every widget built, so it lives
+    /// in an atomic rather than behind a lock: reads must never contend, and a torn value is not
+    /// possible for a 32-bit load. Stored as `f32::to_bits` since there is no `AtomicF32`.
+    pub const DEFAULT_TYPE_SCALE: f32 = 1.2;
+    static TYPE_SCALE_BITS: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0x3F99_999A); // 1.2f32
+
+    pub fn type_scale() -> f32 {
+        f32::from_bits(TYPE_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Set the global type scale. Callers must follow with [`install`] so the `TextStyle` table —
+    /// which egui caches rather than re-reading per frame — picks the new sizes up too.
+    pub fn set_type_scale(v: f32) {
+        TYPE_SCALE_BITS
+            .store(v.clamp(0.8, 2.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
 
     // Type floors, in PRE-scale points. Enforced here rather than trusted to call sites, because
     // the sizes that crept down to 8px were all written inline at the point of use and no reviewer
@@ -467,7 +484,7 @@ pub mod theme {
 
     /// Clamp to the voice's floor, then apply the global scale.
     fn sized(size: f32, floor: f32) -> f32 {
-        size.max(floor) * TYPE_SCALE
+        size.max(floor) * type_scale()
     }
 
     /// The LABEL voice: Oswald Medium, tracked. UI chrome that names things — eyebrows, chips,
@@ -768,12 +785,16 @@ pub mod theme {
 
     /// Command-bar and status-bar heights.
     ///
-    /// Derived from [`TYPE_SCALE`] so they stay proportionate when the type grows — a fixed 46 px
+    /// Derived from [`type_scale`] so they stay proportionate when the type grows — a fixed 46 px
     /// bar that was right at 1.0 scale crops its own title at 1.2. The bars set these as an EXACT
     /// height and centre their contents, which is what keeps the space above and below equal;
     /// letting a panel size to its tallest child makes symmetric padding impossible.
-    pub const BAR_H: f32 = 40.0 * TYPE_SCALE;
-    pub const STATUS_H: f32 = 24.0 * TYPE_SCALE;
+    pub fn bar_h() -> f32 {
+        40.0 * type_scale()
+    }
+    pub fn status_h() -> f32 {
+        24.0 * type_scale()
+    }
 
     /// The frame shared by both bars: panel fill, horizontal breathing room, and NO vertical
     /// margin — the vertical centring does that job, and a margin would fight it.
