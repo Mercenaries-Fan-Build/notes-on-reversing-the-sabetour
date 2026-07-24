@@ -23,6 +23,28 @@ game-files/
 *.xex
 *.7z
 
+# Extracted / derived game asset payloads. These are the game's OWN data carved out of the packs
+# (or re-encoded from it), not anything authored here — the tools regenerate them from the install.
+*.dtex
+*.materials
+*.msha
+*.smsh
+# Texture-dump contact sheets from `sab_poc` inventory runs (PNGs of retail Saboteur art).
+tools/sab_poc/mattias_port/inventory/
+
+# Vendored third-party toolchains — downloaded, not authored here (700 MB combined).
+# Re-fetch rather than version: ffmpeg (gyan.dev build), JDK 21 (Temurin).
+tools/ffmpeg/
+tools/jdk21/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# Local agent/harness state (settings.json IS versioned; these are per-machine)
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
 # Scratch
 _scratch/
 *.tmp
