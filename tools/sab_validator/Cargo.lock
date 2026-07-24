@@ -35,9 +35,9 @@ dependencies = [
 
 [[package]]
 name = "mercs2_formats"
-version = "2.1.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d40e50f1224ae8088933d8f3eecc3d91cc84c0d35532264f673eccfa2912c9"
+checksum = "e70d15241a28884b51a257084bc0d9f5cd86d88f1a9812881013430c66235d99"
 dependencies = [
  "flate2",
 ]
