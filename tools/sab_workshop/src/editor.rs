@@ -6,10 +6,14 @@
 //! * **The mod is the document.** It has a name and one output slot (`DLC/NN/`). The three pages
 //!   edit different parts of the same thing, and they cross-reference each other (an icon added on
 //!   the Icons page is what an Objects property points at).
-//! * **Sources are read-only.** The game already loads `DLC/01/` as a full overlay — it mirrors the
-//!   whole tree (megapacks, Cinematics, GameTemplates) — so a mod is naturally the next slot.
-//!   Nothing here ever writes back over a retail file; publishing is additive and uninstalling is
-//!   deleting a folder.
+//! * **Sources are read-only.** `DLC/01/` mirrors the whole tree (megapacks, Cinematics,
+//!   GameTemplates), so a mod is naturally the next slot. Nothing here ever writes back over a
+//!   retail file; publishing is additive on disk and uninstalling is deleting a folder.
+//!
+//!   It is NOT additive at runtime, which is the thing to know before publishing anything: the
+//!   engine mounts exactly ONE DLC slot — the highest `dlclevel` that has a `dlcinfo.ini`, ties
+//!   going to the lowest slot — and a slot with no manifest is not even a candidate. See
+//!   [`mirror_dlc`] and [`winning_slot`] for what publish therefore has to write.
 //! * **The changelist is the spine.** Every edit records what the value WAS, so revert is free and
 //!   "what have I actually changed" is answerable at a glance. It spans all three pages because a
 //!   real mod does.
@@ -69,15 +73,34 @@ impl Mod {
     fn out_dir(&self) -> String {
         format!("{}/DLC/{}", self.game_dir, self.slot)
     }
-    fn gametext_src(&self, lang: usize) -> String {
+    /// Where the game reads its base UI text from — and the only place an edit to an EXISTING string
+    /// can go (see the destinations note on [`Editor::publish_inner`]).
+    fn gametext_base(&self, lang: usize) -> String {
         format!("{}/Cinematics/Dialog/{}/GameText.dlg", self.game_dir, LANGS[lang].1)
+    }
+    /// Retail, kept beside the patched file. Publishing restores nothing and reverts nothing on its
+    /// own; this is what makes both possible.
+    fn gametext_bak(&self, lang: usize) -> String {
+        format!("{}.sabbak", self.gametext_base(lang))
+    }
+    /// What to read: retail if we have already patched over it. Keeping the pristine copy as the
+    /// source is what keeps publish a pure function of (sources, changelist) — re-publishing applies
+    /// the changelist to retail again rather than stacking edits on yesterday's output.
+    fn gametext_src(&self, lang: usize) -> String {
+        let bak = self.gametext_bak(lang);
+        if std::path::Path::new(&bak).exists() { bak } else { self.gametext_base(lang) }
     }
     fn gametext_out(&self, lang: usize) -> String {
         format!("{}/Cinematics/Dialog/{}/GameText.dlg", self.out_dir(), LANGS[lang].1)
     }
+    /// The retail DLC — source for templates, and the payload the mod's slot has to carry once it
+    /// wins the mount (see [`mirror_dlc`]).
+    fn stock_dlc(&self) -> String {
+        format!("{}/DLC/01", self.game_dir)
+    }
     /// Templates ship inside the DLC overlay, so the game's own `DLC/01` copy is the live source.
     fn templates_src(&self) -> String {
-        format!("{}/DLC/01/GameTemplates.wsd", self.game_dir)
+        format!("{}/GameTemplates.wsd", self.stock_dlc())
     }
     fn templates_out(&self) -> String {
         format!("{}/GameTemplates.wsd", self.out_dir())
@@ -230,6 +253,10 @@ pub struct Editor {
     /// string" are the same question asked of different hashes.
     xref: std::collections::HashMap<u32, Vec<usize>>,
     publish_note: String,
+    /// Whether that note is a success. Kept explicitly rather than sniffed from the note's text: the
+    /// note now also carries the "which slot will the engine actually mount" verdict, and a publish
+    /// that wrote every byte correctly into a slot that loses the mount is not a success.
+    publish_ok: bool,
 
     // --- self-loading assets ---
     str_load: Load<GameText>,
@@ -262,6 +289,7 @@ impl Editor {
             thumbs: Thumbs::default(),
             xref: Default::default(),
             publish_note: String::new(),
+            publish_ok: false,
             str_load: Load::Idle,
             obj_load: Load::Idle,
             icon_load: Load::Idle,
@@ -606,10 +634,28 @@ impl Editor {
                     self.unapply(c);
                 }
             }
+            // Offered whenever anything is installed, not only when the changelist is dirty: the
+            // thing worth undoing is what is on the game's disk, which outlives this session.
+            let installed = (0..LANGS.len()).any(|l| std::path::Path::new(&self.md.gametext_bak(l)).exists())
+                || std::path::Path::new(&format!("{}/dlcinfo.ini", self.md.out_dir())).exists();
+            if installed
+                && ui
+                    .add(egui::Button::new(theme::disp_text("Unpublish", 11.0, theme::TX)))
+                    .on_hover_text(
+                        "Restore every patched retail GameText.dlg from its .sabbak and delete the \
+                         mod's dlcinfo.ini, which un-mounts the slot. The mirrored retail payload \
+                         stays; delete the DLC folder to reclaim the disk.",
+                    )
+                    .clicked()
+            {
+                self.unpublish();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::stamp_button(ui, "Publish", !self.changes.is_empty())
                     .on_hover_text(format!(
-                        "Write {} — a fresh overlay beside the game's own DLC/01/. Sources are never touched.",
+                        "Write {}: the edits, a dlcinfo.ini that outranks every other slot, and a copy of \
+                         DLC/01's payload (~174 MB, first publish only) — the engine mounts one slot and \
+                         the loser does not load. Sources are never touched.",
                         self.md.out_dir()
                     ))
                     .clicked()
@@ -620,7 +666,7 @@ impl Editor {
         });
         if !self.publish_note.is_empty() {
             ui.add_space(4.0);
-            let col = if self.publish_note.starts_with("published") { theme::EMBER } else { theme::RED };
+            let col = if self.publish_ok { theme::EMBER } else { theme::RED };
             ui.label(theme::data_text(&self.publish_note, 10.0, col));
         }
         ui.add_space(3.0);
@@ -677,55 +723,100 @@ impl Editor {
 
     // ------------------------------------------------------------------ publish
 
-    /// Write the overlay. Every source is re-read fresh and every change re-applied, so publishing
-    /// is a pure function of (sources, changelist) — it can be run twice and never compounds.
+    /// Write the overlay, then check the engine would actually mount it.
+    ///
+    /// The write half is a pure function of (sources, changelist): every source is re-read fresh and
+    /// every change re-applied, so publishing twice never compounds. The check half exists because
+    /// this used to report success for an overlay the game could not see — a slot with no
+    /// `dlcinfo.ini` is not a mount candidate at all, and only one slot mounts.
     fn publish(&mut self) {
-        let out = self.md.out_dir();
-        let mut wrote: Vec<String> = Vec::new();
-
-        // ---- strings, per language ----
-        for lang in 0..LANGS.len() {
-            let ops: Vec<&Op> = self
-                .changes
-                .iter()
-                .map(|c| &c.op)
-                .filter(|o| matches!(o, Op::SetString { lang: l, .. } | Op::AddString { lang: l, .. } if *l == lang))
-                .collect();
-            if ops.is_empty() {
-                continue;
+        match self.publish_inner() {
+            Ok(note) => {
+                self.publish_ok = !note.contains("WARNING");
+                self.publish_note = note;
             }
-            let src = self.md.gametext_src(lang);
-            let Ok(bytes) = std::fs::read(&src) else {
-                self.publish_note = format!("cannot read {src}");
-                return;
-            };
-            let Ok(mut gt) = GameText::parse(&bytes) else {
-                self.publish_note = format!("cannot parse {src}");
-                return;
-            };
-            for op in ops {
-                match op {
-                    Op::SetString { asset_id, text, .. } => {
-                        if let Some(r) = gt.find_mut(*asset_id) {
-                            r.set_text(text);
-                        }
+            Err(e) => {
+                self.publish_ok = false;
+                self.publish_note = e;
+            }
+        }
+    }
+
+    fn publish_inner(&self) -> Result<String, String> {
+        let out = self.md.out_dir();
+        // Display names for the note, and the slot-relative paths the mirror must not overwrite.
+        let mut wrote: Vec<String> = Vec::new();
+        let mut mine: Vec<String> = Vec::new();
+
+        // ---- strings, per language: two destinations, because the engine forces it ----
+        //
+        // A DLC `GameText.dlg` can only ADD ids. Both text layers insert into the one map the lookup
+        // searches, `FUN_009603f0` @0x009603f0 refuses a hash the map already holds, and the base file
+        // is loaded during init while the DLC mount runs later off the per-frame state machine. So an
+        // edit of a retail string published into the slot is loaded, rejected, and silently ignored —
+        // which is exactly how a byte-perfect overlay changed nothing in game.
+        //
+        // Edits therefore patch the base file, with retail preserved beside it as `.sabbak` (that copy
+        // is also what publish reads back, so this never compounds, and `unpublish` can undo it).
+        // Additions keep going to the mod's slot, where they work and where uninstalling is deleting a
+        // folder.
+        for lang in 0..LANGS.len() {
+            let mut sets: Vec<(u32, &str)> = Vec::new();
+            let mut adds: Vec<(&str, &str)> = Vec::new();
+            for c in &self.changes {
+                match &c.op {
+                    Op::SetString { lang: l, asset_id, text } if *l == lang => {
+                        sets.push((*asset_id, text))
                     }
-                    Op::AddString { dotted, text, .. } => {
-                        let _ = gt.add_ui(dotted, text);
+                    Op::AddString { lang: l, dotted, text } if *l == lang => {
+                        adds.push((dotted, text))
                     }
                     _ => {}
                 }
             }
-            let dst = self.md.gametext_out(lang);
-            if let Some(p) = std::path::Path::new(&dst).parent() {
-                let _ = std::fs::create_dir_all(p);
+            if sets.is_empty() && adds.is_empty() {
+                continue;
             }
-            match std::fs::write(&dst, gt.write()) {
-                Ok(_) => wrote.push(format!("{}/GameText.dlg", LANGS[lang].1)),
-                Err(e) => {
-                    self.publish_note = format!("write {dst}: {e}");
-                    return;
+            let src = self.md.gametext_src(lang);
+            let bytes = std::fs::read(&src).map_err(|_| format!("cannot read {src}"))?;
+
+            let rel = format!("Cinematics/Dialog/{}/GameText.dlg", LANGS[lang].1);
+            if !adds.is_empty() {
+                let mut gt = GameText::parse(&bytes).map_err(|_| format!("cannot parse {src}"))?;
+                for (dotted, text) in &adds {
+                    let _ = gt.add_ui(dotted, text);
                 }
+                write_file(&self.md.gametext_out(lang), &gt.write())?;
+                wrote.push(format!("{} +{} new string(s)", LANGS[lang].1, adds.len()));
+                mine.push(rel);
+            } else {
+                // An earlier publish may have put a file here — including one from before edits were
+                // known to belong in the base file. Left behind it is inert (the engine rejects its
+                // duplicate hashes) and misleading: it reads as a live override that does nothing.
+                // Only removed when retail could not have supplied it, so the mirror is never eaten.
+                let out_file = self.md.gametext_out(lang);
+                if std::path::Path::new(&out_file).exists()
+                    && !std::path::Path::new(&format!("{}/{rel}", self.md.stock_dlc())).exists()
+                {
+                    std::fs::remove_file(&out_file).map_err(|e| format!("remove {out_file}: {e}"))?;
+                    wrote.push(format!("{} slot copy removed", LANGS[lang].1));
+                }
+            }
+
+            if !sets.is_empty() {
+                let mut gt = GameText::parse(&bytes).map_err(|_| format!("cannot parse {src}"))?;
+                for (id, text) in &sets {
+                    if let Some(r) = gt.find_mut(*id) {
+                        r.set_text(text);
+                    }
+                }
+                // Back up BEFORE the first patch, never after: the copy has to be retail.
+                let (base, bak) = (self.md.gametext_base(lang), self.md.gametext_bak(lang));
+                if !std::path::Path::new(&bak).exists() {
+                    std::fs::copy(&base, &bak).map_err(|e| format!("back up {base}: {e}"))?;
+                }
+                write_file(&base, &gt.write())?;
+                wrote.push(format!("{} base ×{} (retail → .sabbak)", LANGS[lang].1, sets.len()));
             }
         }
 
@@ -740,14 +831,8 @@ impl Editor {
             .collect();
         if !pair_ops.is_empty() {
             let src = self.md.templates_src();
-            let Ok(bytes) = std::fs::read(&src) else {
-                self.publish_note = format!("cannot read {src}");
-                return;
-            };
-            let Ok((mut gt, _)) = GameTemplates::parse(&bytes) else {
-                self.publish_note = format!("cannot parse {src}");
-                return;
-            };
+            let bytes = std::fs::read(&src).map_err(|_| format!("cannot read {src}"))?;
+            let (mut gt, _) = GameTemplates::parse(&bytes).map_err(|_| format!("cannot parse {src}"))?;
             for (e, p, b) in pair_ops {
                 if let Some(Entry::Template(t)) = gt.entries.get_mut(e) {
                     if let Some(pp) = t.pairs.get_mut(p) {
@@ -755,17 +840,9 @@ impl Editor {
                     }
                 }
             }
-            let dst = self.md.templates_out();
-            if let Some(pp) = std::path::Path::new(&dst).parent() {
-                let _ = std::fs::create_dir_all(pp);
-            }
-            match std::fs::write(&dst, gt.write()) {
-                Ok(_) => wrote.push("GameTemplates.wsd".into()),
-                Err(e) => {
-                    self.publish_note = format!("write {dst}: {e}");
-                    return;
-                }
-            }
+            write_file(&self.md.templates_out(), &gt.write())?;
+            wrote.push("GameTemplates.wsd".into());
+            mine.push("GameTemplates.wsd".into());
         }
 
         // ---- reserved texture names ----
@@ -785,17 +862,115 @@ impl Editor {
             for n in &reserved {
                 s.push_str(&format!("{n}\t0x{:08X}\n", pandemic_hash(n)));
             }
-            let dst = format!("{out}/textures.wanted.tsv");
-            let _ = std::fs::create_dir_all(&out);
-            if std::fs::write(&dst, s).is_ok() {
-                wrote.push("textures.wanted.tsv".into());
+            write_file(&format!("{out}/textures.wanted.tsv"), s.as_bytes())?;
+            wrote.push("textures.wanted.tsv".into());
+            mine.push("textures.wanted.tsv".into());
+        }
+
+        if wrote.is_empty() {
+            return Ok("nothing to write".into());
+        }
+
+        // Nothing went into the slot — a mod of nothing but string edits is now exactly two patched
+        // base files, and claiming the mount for it would cost 174 MB and unmount DLC/01 for no gain.
+        // An old manifest must go with it: left in place it would keep the mount pointed at a slot
+        // with no mod content, so DLC/01 stays unmounted for nothing.
+        if mine.is_empty() {
+            let ini = format!("{out}/dlcinfo.ini");
+            if std::path::Path::new(&ini).exists() {
+                std::fs::remove_file(&ini).map_err(|e| format!("remove {ini}: {e}"))?;
+                wrote.push(format!("DLC/{} un-mounted (nothing left in it)", self.md.slot));
+            }
+            return Ok(format!("published ({})", wrote.join(", ")));
+        }
+
+        // ---- the retail payload this slot has to carry ----
+        // Winner takes all: once the mod's slot mounts, DLC/01 does not, and everything it provided
+        // stops loading. Skipped when publishing into 01 itself, which would be a self-copy.
+        if self.md.slot != "01" {
+            let (n, bytes) = mirror_dlc(&self.md.stock_dlc(), &out, &mine)?;
+            if n > 0 {
+                wrote.push(format!("+{n} retail file(s), {:.0} MB", bytes as f64 / 1_048_576.0));
             }
         }
 
-        self.publish_note = if wrote.is_empty() {
-            "nothing to write".into()
+        // ---- dlcinfo.ini — the manifest that makes the slot exist at all ----
+        // One more than the best of the OTHER slots, because ties keep the lowest slot: matching
+        // retail's `dlclevel=1` from slot 02 loses to DLC/01 and mounts nothing.
+        let rival = DLC_SLOTS
+            .iter()
+            .filter(|s| **s != self.md.slot)
+            .filter_map(|s| read_dlclevel(&format!("{}/DLC/{s}", self.md.game_dir)))
+            .max()
+            .unwrap_or(0);
+        write_file(&format!("{out}/dlcinfo.ini"), dlcinfo(&self.md.name, rival + 1).as_bytes())?;
+        wrote.push("dlcinfo.ini".into());
+
+        // ---- and would the engine actually take it? ----
+        let verdict = if !DLC_SLOTS.contains(&self.md.slot.as_str()) {
+            format!(
+                "WARNING: the engine only probes DLC/{}..{} — nothing in DLC/{} is ever read",
+                DLC_SLOTS[0],
+                DLC_SLOTS[DLC_SLOTS.len() - 1],
+                self.md.slot
+            )
         } else {
-            format!("published → {} ({})", out, wrote.join(", "))
+            match winning_slot(&self.md.game_dir) {
+                Some((s, l)) if s == self.md.slot => {
+                    format!("engine mounts DLC/{s} (dlclevel {l}) — this mod")
+                }
+                Some((s, l)) => format!("WARNING: engine mounts DLC/{s} (dlclevel {l}), not this mod"),
+                None => "WARNING: no slot has a dlcinfo.ini — no DLC will mount".into(),
+            }
+        };
+
+        Ok(format!("published → {} ({})\n{}", out, wrote.join(", "), verdict))
+    }
+
+    /// Put the game back the way it was found.
+    ///
+    /// Two distinct undos, because publish has two destinations: every patched base `GameText.dlg` is
+    /// restored from its `.sabbak` (and the backup removed, so the next publish starts from retail
+    /// again), and the mod's `dlcinfo.ini` is deleted — which is all it takes to un-mount the slot,
+    /// since a slot with no manifest is not a candidate and `DLC/01` wins again.
+    ///
+    /// The mirrored retail payload is left alone: it is 174 MB of copies, harmless once nothing points
+    /// at it, and deleting `DLC/<slot>/` reclaims it whenever the modder wants.
+    fn unpublish(&mut self) {
+        let mut done: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+
+        for lang in 0..LANGS.len() {
+            let bak = self.md.gametext_bak(lang);
+            if !std::path::Path::new(&bak).exists() {
+                continue;
+            }
+            let base = self.md.gametext_base(lang);
+            match std::fs::copy(&bak, &base).and_then(|_| std::fs::remove_file(&bak)) {
+                Ok(_) => done.push(format!("{} restored", LANGS[lang].1)),
+                Err(e) => failed.push(format!("{}: {e}", LANGS[lang].1)),
+            }
+        }
+
+        let ini = format!("{}/dlcinfo.ini", self.md.out_dir());
+        if std::path::Path::new(&ini).exists() {
+            match std::fs::remove_file(&ini) {
+                Ok(_) => done.push(format!("DLC/{} un-mounted", self.md.slot)),
+                Err(e) => failed.push(format!("dlcinfo.ini: {e}")),
+            }
+        }
+
+        self.publish_ok = failed.is_empty();
+        self.publish_note = if !failed.is_empty() {
+            format!("WARNING: {}", failed.join("; "))
+        } else if done.is_empty() {
+            "nothing published to undo".into()
+        } else {
+            let now = match winning_slot(&self.md.game_dir) {
+                Some((s, l)) => format!("engine mounts DLC/{s} (dlclevel {l})"),
+                None => "no DLC will mount".into(),
+            };
+            format!("unpublished ({})\n{}", done.join(", "), now)
         };
     }
 
@@ -2084,6 +2259,167 @@ fn four_readings(ui: &mut egui::Ui, v: u32) {
         });
 }
 
+// ---------------------------------------------------------------------------------------------
+// DLC slots — what the engine actually mounts
+// ---------------------------------------------------------------------------------------------
+//
+// Everything below is read off the retail PC binary's DLC state machine (`FUN_00990d30`
+// @0x00990d30) and the mount it drives (`FUN_009906c0` @0x009906c0). Three rules matter, and all
+// three are the kind that fail silently:
+//
+// 1. The slot list is hardcoded to four — `sprintf_s(..., "dlc\\%02d", i + 1)` with a count of 4.
+// 2. A slot only becomes a candidate when its `dlcinfo.ini` OPENS (`FUN_00990320` sets the flag);
+//    the payload is never looked at otherwise.
+// 3. Exactly one slot mounts: the highest `dlclevel`, compared with a strict `<`, so ties keep the
+//    lowest slot. The loser is not layered underneath — it simply does not load.
+
+/// The slots the engine probes, in the order it probes them.
+const DLC_SLOTS: [&str; 4] = ["01", "02", "03", "04"];
+
+/// Files `FUN_009906c0` opens by hardcoded name inside whichever slot won. Documented here because
+/// two of them are traps: `dlc01mega0.megapack` keeps that literal name in EVERY slot, and the
+/// `megapack=` key in `dlcinfo.ini` is parsed into the DLC record and then never read — renaming a
+/// pack and pointing the key at it silently loads nothing.
+#[allow(dead_code)]
+const DLC_MOUNTED_NAMES: [&str; 7] = [
+    "Animations.pack",
+    "dlc01mega0.megapack",
+    "dynamic0.megapack",
+    "palettes0.megapack",
+    "global.map",
+    "GameTemplates.wsd",
+    "France.map",
+];
+
+/// Create the parent directory and write, reporting WHICH step failed. `create_dir_all` used to be
+/// discarded here, so a permission problem surfaced one line later as a confusing write error.
+fn write_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    if let Some(p) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(p).map_err(|e| format!("create {}: {e}", p.display()))?;
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("write {path}: {e}"))
+}
+
+/// A slot's `dlclevel`, or `None` when it has no `dlcinfo.ini` — which is exactly the engine's test
+/// for "this slot exists", so `None` means invisible however complete the payload is.
+///
+/// Key matching mirrors the engine's `__strnicmp(line, "dlclevel", 8)`: the comparison starts at the
+/// beginning of the LINE, which is why `//dlclevel=9` is a comment and an indented key is not read.
+/// A file with no `dlclevel` at all reads as 0, matching the zeroed DLC record.
+fn read_dlclevel(dir: &str) -> Option<i32> {
+    let text = std::fs::read_to_string(format!("{dir}/dlcinfo.ini")).ok()?;
+    let mut level = 0;
+    for line in text.lines() {
+        let Some((key, val)) = line.split_once('=') else { continue };
+        if !key.to_ascii_lowercase().starts_with("dlclevel") {
+            continue;
+        }
+        // `_atol` stops at the first non-digit, so trailing junk and quotes are harmless.
+        let digits: String =
+            val.trim_start().chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+        if let Ok(n) = digits.parse::<i32>() {
+            level = n;
+        }
+    }
+    Some(level)
+}
+
+/// Which slot the engine will mount, and at what level. `None` when no slot has a manifest.
+fn winning_slot(game_dir: &str) -> Option<(&'static str, i32)> {
+    let mut best: Option<(&'static str, i32)> = None;
+    for slot in DLC_SLOTS {
+        let Some(level) = read_dlclevel(&format!("{game_dir}/DLC/{slot}")) else { continue };
+        // Strict `<`: a tie keeps the slot already held, which is the earlier (lower) one.
+        if best.is_none_or(|(_, b)| b < level) {
+            best = Some((slot, level));
+        }
+    }
+    best
+}
+
+/// The manifest. Retail's shape, with only `dlclevel` doing any work.
+///
+/// `savedlclevel` is inert twice over — the parser wants `saveddlclevel` and nothing in the mount
+/// reads it — and is kept only so the file looks like the one it sits beside. `hasnudity` matches
+/// `DLC/01` because the mod's slot carries that same mirrored payload.
+fn dlcinfo(mod_name: &str, level: i32) -> String {
+    format!(
+        "// {mod_name} — published by sab_workshop\n\
+         // The engine mounts ONE DLC: the highest dlclevel with a dlcinfo.ini, ties to the lowest\n\
+         // slot. This level beats every other slot on disk at publish time. Raising a rival slot's\n\
+         // level, or adding one, takes the mount away from this mod.\n\
+         megapack=\"Files\\dlc01mega0.megapack\"\n\
+         dlclevel={level}\n\
+         savedlclevel=0\n\
+         hasnudity=1\n"
+    )
+}
+
+/// Copy the retail DLC's payload into the mod's slot, skipping anything the mod publishes itself.
+///
+/// This is not belt-and-braces, it is the cost of winning the mount. `FUN_00990d30` mounts one slot;
+/// when that is the mod's, `DLC/01` is not mounted at all and everything it provided —
+/// `dlc01mega0.megapack`, `Animations.pack`, the France packs, `Sound\` — stops loading. The engine
+/// looks for those inside the winning slot by hardcoded name, so the mod has to carry them.
+///
+/// `skip` holds slot-relative paths the mod wrote; they are compared case-insensitively with `/`
+/// separators, since the mod's `GameTemplates.wsd` must not be clobbered by retail's. A destination
+/// that already matches in size and is no older than its source is left alone, so republishing after
+/// the first mirror costs nothing.
+///
+/// Returns (files copied, bytes copied).
+fn mirror_dlc(from: &str, to: &str, skip: &[String]) -> Result<(usize, u64), String> {
+    fn walk(
+        from: &std::path::Path,
+        to: &std::path::Path,
+        rel: &str,
+        skip: &[String],
+        n: &mut usize,
+        bytes: &mut u64,
+    ) -> Result<(), String> {
+        let dir = std::fs::read_dir(from).map_err(|e| format!("read {}: {e}", from.display()))?;
+        for entry in dir {
+            let entry = entry.map_err(|e| format!("read {}: {e}", from.display()))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let src = entry.path();
+            let dst = to.join(&name);
+            if src.is_dir() {
+                walk(&src, &dst, &child_rel, skip, n, bytes)?;
+                continue;
+            }
+            if skip.iter().any(|s| s.eq_ignore_ascii_case(&child_rel)) {
+                continue;
+            }
+            let meta = src.metadata().map_err(|e| format!("stat {}: {e}", src.display()))?;
+            if let Ok(d) = dst.metadata() {
+                let fresh = match (d.modified(), meta.modified()) {
+                    (Ok(a), Ok(b)) => a >= b,
+                    _ => false,
+                };
+                if d.len() == meta.len() && fresh {
+                    continue;
+                }
+            }
+            std::fs::create_dir_all(to).map_err(|e| format!("create {}: {e}", to.display()))?;
+            *bytes += std::fs::copy(&src, &dst)
+                .map_err(|e| format!("copy {} → {}: {e}", src.display(), dst.display()))?;
+            *n += 1;
+        }
+        Ok(())
+    }
+
+    let (mut n, mut bytes) = (0usize, 0u64);
+    let src = std::path::Path::new(from);
+    if !src.is_dir() {
+        // No retail DLC to carry (a stripped install). The mod still publishes; it just cannot
+        // preserve content that was never there.
+        return Ok((0, 0));
+    }
+    walk(src, std::path::Path::new(to), "", skip, &mut n, &mut bytes)?;
+    Ok((n, bytes))
+}
+
 /// Accept decimal, `0x…` hex, or a float — whichever the modder typed.
 fn parse_u32_any(t: &str) -> Result<u32, String> {
     let t = t.trim();
@@ -2097,4 +2433,226 @@ fn parse_u32_any(t: &str) -> Result<u32, String> {
         return Ok(f.to_bits());
     }
     Err("not a number".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("sab_workshop_dlc_{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch");
+        d
+    }
+
+    fn slot(root: &std::path::Path, n: &str, ini: Option<&str>) -> String {
+        let dir = root.join("DLC").join(n);
+        std::fs::create_dir_all(&dir).expect("slot");
+        if let Some(text) = ini {
+            std::fs::write(dir.join("dlcinfo.ini"), text).expect("ini");
+        }
+        dir.to_string_lossy().replace('\\', "/")
+    }
+
+    /// Retail's own manifest, verbatim — the shape every check here has to agree with.
+    const RETAIL_01: &str = "megapack=\"Files\\dlc01mega0.megapack\"\ndlclevel=1\nsavedlclevel=0\nhasnudity=1\n//autorunlua=\"\"\n";
+
+    #[test]
+    fn dlclevel_reads_retail_and_ignores_lookalikes() {
+        let root = scratch("read");
+        let one = slot(&root, "01", Some(RETAIL_01));
+        assert_eq!(read_dlclevel(&one), Some(1));
+
+        // `savedlclevel` must not be mistaken for `dlclevel`, and a commented key is a comment:
+        // the engine compares from the start of the line, so neither matches there either.
+        let two = slot(&root, "02", Some("savedlclevel=9\n//dlclevel=7\nhasnudity=0\n"));
+        assert_eq!(read_dlclevel(&two), Some(0));
+
+        // No manifest is not level 0 — it is "not a slot", which is the whole bug this catches.
+        let three = slot(&root, "03", None);
+        assert_eq!(read_dlclevel(&three), None);
+    }
+
+    /// A mod that merely matches retail's level loses: the engine's compare is strict, so the tie
+    /// keeps the lower slot. This is why `publish` writes one MORE than the best rival.
+    #[test]
+    fn ties_keep_the_lowest_slot_and_the_highest_level_wins() {
+        let root = scratch("win");
+        let game = root.to_string_lossy().replace('\\', "/");
+        slot(&root, "01", Some(RETAIL_01));
+
+        slot(&root, "02", Some("dlclevel=1\n"));
+        assert_eq!(winning_slot(&game), Some(("01", 1)), "a tie must not take the mount");
+
+        slot(&root, "02", Some("dlclevel=2\n"));
+        assert_eq!(winning_slot(&game), Some(("02", 2)));
+
+        // A payload with no manifest stays invisible however high the other slots are.
+        slot(&root, "03", None);
+        assert_eq!(winning_slot(&game), Some(("02", 2)));
+    }
+
+    /// What `publish` writes must be what `winning_slot` then reads — these two agreeing is the
+    /// entire guarantee that the published mod is the one that mounts.
+    #[test]
+    fn published_manifest_beats_retail() {
+        let root = scratch("manifest");
+        let game = root.to_string_lossy().replace('\\', "/");
+        slot(&root, "01", Some(RETAIL_01));
+        let two = slot(&root, "02", None);
+
+        let rival = read_dlclevel(&slot(&root, "01", Some(RETAIL_01))).unwrap_or(0);
+        std::fs::write(format!("{two}/dlcinfo.ini"), dlcinfo("Test mod", rival + 1)).expect("write");
+
+        assert_eq!(read_dlclevel(&two), Some(2));
+        assert_eq!(winning_slot(&game), Some(("02", 2)));
+    }
+
+    #[test]
+    fn mirror_carries_retail_payload_but_never_the_mods_own_files() {
+        let root = scratch("mirror");
+        let from = root.join("from");
+        let to = root.join("to");
+        std::fs::create_dir_all(from.join("France")).expect("mk");
+        std::fs::write(from.join("dlc01mega0.megapack"), b"pack").expect("w");
+        std::fs::write(from.join("GameTemplates.wsd"), b"retail templates").expect("w");
+        std::fs::write(from.join("France/0.pack"), b"france").expect("w");
+        std::fs::create_dir_all(&to).expect("mk");
+        std::fs::write(to.join("GameTemplates.wsd"), b"mine").expect("w");
+
+        let f = from.to_string_lossy().to_string();
+        let to_s = to.to_string_lossy().to_string();
+        let skip = vec!["gametemplates.WSD".to_string()];
+        let (n, bytes) = mirror_dlc(&f, &to_s, &skip).expect("mirror");
+        assert_eq!(n, 2, "the two retail files, not the mod's own");
+        assert_eq!(bytes, 10);
+        assert_eq!(std::fs::read(to.join("GameTemplates.wsd")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(to.join("France/0.pack")).unwrap(), b"france");
+
+        // Republishing must not re-copy 174 MB every time.
+        let (n2, _) = mirror_dlc(&f, &to_s, &skip).expect("mirror twice");
+        assert_eq!(n2, 0);
+    }
+
+    /// The install these tests read from, found the same way the app finds it. Never a literal path:
+    /// the one setting everything derives from is `settings::game_dir`, and a test that hardcodes it
+    /// passes or fails on where the game happens to live.
+    fn install() -> Option<String> {
+        let dir = crate::settings::detect_install();
+        if dir.is_none() {
+            eprintln!("skip: no Saboteur install detected");
+        }
+        dir
+    }
+
+    /// Ground truth: retail's own manifest, read off the real install rather than a fixture. If this
+    /// ever disagrees, the level `publish` picks is being computed against the wrong baseline.
+    #[test]
+    fn retail_dlc01_is_level_one_on_disk() {
+        let Some(game) = install() else { return };
+        assert_eq!(read_dlclevel(&format!("{game}/DLC/01")), Some(1));
+    }
+
+    /// Stage a temp install carrying a real retail `GameText.dlg`, or `None` when the game is not
+    /// on this machine.
+    fn staged_install(name: &str) -> Option<(std::path::PathBuf, String)> {
+        let retail = format!("{}/Cinematics/Dialog/English/GameText.dlg", install()?);
+        if !std::path::Path::new(&retail).exists() {
+            eprintln!("skip: {retail} not present");
+            return None;
+        }
+        let root = scratch(name);
+        let dir = root.join("Cinematics/Dialog/English");
+        std::fs::create_dir_all(&dir).expect("mk");
+        std::fs::copy(&retail, dir.join("GameText.dlg")).expect("seed");
+        let game = root.to_string_lossy().replace('\\', "/");
+        Some((root, game))
+    }
+
+    /// An edit of an EXISTING string must land in the base file — a DLC slot cannot override a hash
+    /// the base map already holds (`FUN_009603f0` rejects the duplicate) — and must leave retail
+    /// recoverable. The slot must stay untouched: claiming the mount for a text edit would unmount
+    /// DLC/01 for nothing.
+    #[test]
+    fn editing_a_retail_string_patches_base_and_leaves_the_slot_alone() {
+        let Some((root, game)) = staged_install("setstring") else { return };
+        let mut ed = Editor::new(&game, 0, "02", "Test mod");
+
+        let base = root.join("Cinematics/Dialog/English/GameText.dlg");
+        let retail = std::fs::read(&base).expect("read");
+        let gt = GameText::parse(&retail).expect("parse");
+        let id = gt.records[0].asset_id;
+
+        ed.changes.push(Change {
+            target: format!("EN 0x{id:08X}"),
+            before: "before".into(),
+            after: "after".into(),
+            op: Op::SetString { lang: 0, asset_id: id, text: "PATCHED BY TEST".into() },
+        });
+        let note = ed.publish_inner().expect("publish");
+
+        let bak = root.join("Cinematics/Dialog/English/GameText.dlg.sabbak");
+        assert!(bak.exists(), "retail must be preserved: {note}");
+        assert_eq!(std::fs::read(&bak).unwrap(), retail, "the backup must BE retail");
+        let patched = GameText::parse(&std::fs::read(&base).unwrap()).expect("reparse");
+        assert_eq!(patched.find(id).map(|r| r.text_string()), Some("PATCHED BY TEST".to_string()));
+        assert!(!root.join("DLC/02").exists(), "a base-only edit must not touch the slot");
+
+        // A slot file and manifest left by an earlier publish must be cleaned up, not left lying
+        // there looking like a live override — that residue is what made the last diagnosis hard.
+        let stale = root.join("DLC/02/Cinematics/Dialog/English/GameText.dlg");
+        std::fs::create_dir_all(stale.parent().unwrap()).expect("mk");
+        std::fs::write(&stale, &retail).expect("stale");
+        std::fs::write(root.join("DLC/02/dlcinfo.ini"), dlcinfo("old", 2)).expect("stale ini");
+        ed.publish_inner().expect("republish over residue");
+        assert!(!stale.exists(), "the dead slot copy must be removed");
+        assert!(!root.join("DLC/02/dlcinfo.ini").exists(), "an empty slot must stop mounting");
+
+        // Publishing again reads the .sabbak, so the edit never stacks on yesterday's output.
+        assert_eq!(ed.md.gametext_src(0), bak.to_string_lossy().replace('\\', "/"));
+        ed.publish_inner().expect("republish");
+        assert_eq!(std::fs::read(&bak).unwrap(), retail, "republish must not re-back-up the patch");
+
+        // And unpublish puts it back byte for byte.
+        ed.unpublish();
+        assert_eq!(std::fs::read(&base).unwrap(), retail);
+        assert!(!bak.exists(), "the backup is consumed by the restore");
+    }
+
+    /// A NEW id is the one string change a DLC slot can carry, so it goes there — and only then does
+    /// the slot need a manifest.
+    #[test]
+    fn adding_a_string_goes_to_the_slot_with_a_manifest() {
+        let Some((root, game)) = staged_install("addstring") else { return };
+        let mut ed = Editor::new(&game, 0, "02", "Test mod");
+        ed.changes.push(Change {
+            target: "EN MyMod_Text.MyKey".into(),
+            before: String::new(),
+            after: "hello".into(),
+            op: Op::AddString { lang: 0, dotted: "MyMod_Text.MyKey".into(), text: "hello".into() },
+        });
+        let note = ed.publish_inner().expect("publish");
+
+        assert!(root.join("DLC/02/Cinematics/Dialog/English/GameText.dlg").exists());
+        assert_eq!(read_dlclevel(&format!("{game}/DLC/02")), Some(1), "no rival slot here");
+        assert!(note.contains("engine mounts DLC/02"), "{note}");
+        assert!(
+            !root.join("Cinematics/Dialog/English/GameText.dlg.sabbak").exists(),
+            "an addition must not patch the base file"
+        );
+
+        let out = GameText::parse(&std::fs::read(root.join("DLC/02/Cinematics/Dialog/English/GameText.dlg")).unwrap())
+            .expect("parse");
+        assert_eq!(out.find(pandemic_hash("MyMod_Text.MyKey")).map(|r| r.text_string()), Some("hello".into()));
+    }
+
+    /// A stripped install has no DLC/01 to carry; publishing must still succeed.
+    #[test]
+    fn mirror_of_a_missing_retail_dlc_is_not_an_error() {
+        let root = scratch("nodlc");
+        let missing = root.join("DLC").join("01").to_string_lossy().to_string();
+        let to = root.join("DLC").join("02").to_string_lossy().to_string();
+        assert_eq!(mirror_dlc(&missing, &to, &[]), Ok((0, 0)));
+    }
 }

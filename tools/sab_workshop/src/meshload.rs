@@ -581,8 +581,12 @@ mod bbox_tests {
             "CH_AL_SeanDevlin_01_HD",
             "CH_AL_SeanDevlin_01_HAT",
         ];
+        let Some(s) = crate::settings::detected() else {
+            eprintln!("skip: no Saboteur install detected");
+            return;
+        };
         for pk in ["patchdynamic0.megapack", "Dynamic0.megapack"] {
-            let path = format!("C:/GOG Games/The Saboteur/Global/{pk}");
+            let path = format!("{}/Global/{pk}", s.game_dir);
             if !std::path::Path::new(&path).exists() {
                 eprintln!("skip: {path} not present");
                 continue;
@@ -636,7 +640,11 @@ mod tests {
     /// (3389 verts / 10044 indices / 5 prims, per docs/formats/mesh_geometry.md).
     #[test]
     fn load_sean_gr_from_megapack() {
-        let mp = "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack";
+        let Some(s) = crate::settings::detected() else {
+            eprintln!("skip: no Saboteur install detected");
+            return;
+        };
+        let mp = &s.megapack();
         if !std::path::Path::new(mp).exists() {
             eprintln!("skip: {mp} not present");
             return;
@@ -684,7 +692,11 @@ mod hat_tests {
     /// parentBone naming a head bone.
     #[test]
     fn hat_is_rigid_attachment_with_parent_bone() {
-        let mp = "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack";
+        let Some(s) = crate::settings::detected() else {
+            eprintln!("skip: no Saboteur install detected");
+            return;
+        };
+        let mp = &s.megapack();
         if !std::path::Path::new(mp).exists() {
             eprintln!("skip: no megapack");
             return;

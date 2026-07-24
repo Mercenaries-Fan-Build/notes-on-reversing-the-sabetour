@@ -175,6 +175,15 @@ impl Settings {
     }
 }
 
+/// Settings for whatever install is on this machine, or `None` when there is none.
+///
+/// The entry point for anything that must not name an install location literally — tests and
+/// headless runs included. A hardcoded `C:/GOG Games/...` passes on the machine it was written on
+/// and is a lie everywhere else; this asks the same detector the app uses.
+pub fn detected() -> Option<Settings> {
+    detect_install().map(|game_dir| Settings { game_dir, ..Default::default() })
+}
+
 /// Look for an install in the usual places, so first run is usually zero-configuration. Ordered
 /// most- to least-likely; the first hit that passes the required-file check wins.
 pub fn detect_install() -> Option<String> {

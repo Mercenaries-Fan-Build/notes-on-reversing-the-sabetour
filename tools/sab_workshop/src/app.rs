@@ -1539,7 +1539,9 @@ fn settings_page(ctx: &egui::Context, sx: &mut SettingsCtx) {
                 ui.add(
                     egui::TextEdit::singleline(&mut sx.dir_edit)
                         .desired_width(430.0)
-                        .hint_text("C:/GOG Games/The Saboteur"),
+                        // Describe the folder, do not name one: the install lives somewhere
+                        // different on every machine, which is what Detect is for.
+                        .hint_text("the folder holding Global/, France.materials and Saboteur.exe"),
                 );
                 if ui.button("Detect").clicked() {
                     match crate::settings::detect_install() {
@@ -1598,7 +1600,7 @@ fn settings_page(ctx: &egui::Context, sx: &mut SettingsCtx) {
                     ui.label(theme::data_text("DLC/", 11.0, theme::FAINT));
                     ui.add(egui::TextEdit::singleline(&mut sx.s.dlc_slot).desired_width(48.0));
                     ui.label(theme::data_text(
-                        "01 is the game's own overlay — do not publish into it",
+                        "02–04 only: the engine probes four slots and 01 is the game's own",
                         10.0,
                         theme::FAINT,
                     ));

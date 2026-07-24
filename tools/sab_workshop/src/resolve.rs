@@ -474,10 +474,14 @@ mod tests {
     use super::*;
 
     /// Against the REAL install: find + decode Sean's diffuse textures from Dynamic0.megapack.
-    /// Skips cleanly when the game isn't installed at the default path.
+    /// Skips cleanly when no install is detected — the location is never assumed.
     #[test]
     fn resolve_sean_diffuse_from_megapack() {
-        let mp = "C:/GOG Games/The Saboteur/Global/Dynamic0.megapack";
+        let Some(s) = crate::settings::detected() else {
+            eprintln!("skip: no Saboteur install detected");
+            return;
+        };
+        let mp = &s.megapack();
         if !std::path::Path::new(mp).exists() {
             eprintln!("skip: {mp} not present");
             return;

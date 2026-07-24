@@ -53,10 +53,37 @@ pub struct Config {
     pub settings: crate::settings::Settings,
 }
 
+/// Where this repo's generated assets (`skeletons/`, `anim_bone_map.json`) live.
+///
+/// This used to be one author's absolute checkout path, compiled into the binary — correct on
+/// exactly one machine and a dead default in every release build. Resolved instead, in order:
+/// `SAB_WORKSHOP_OUTPUT`, then the nearest `output/` walking up from the working directory and from
+/// the executable, then a bare relative `output`. `--mesh`/`--skel`/`--index` still override.
+fn output_dir() -> String {
+    if let Ok(v) = std::env::var("SAB_WORKSHOP_OUTPUT") {
+        return v.replace('\\', "/");
+    }
+    let starts = [std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))];
+    for start in starts.into_iter().flatten() {
+        let mut dir = start.as_path();
+        loop {
+            let cand = dir.join("output");
+            if cand.join("skeletons").is_dir() {
+                return cand.to_string_lossy().replace('\\', "/");
+            }
+            match dir.parent() {
+                Some(p) => dir = p,
+                None => break,
+            }
+        }
+    }
+    "output".into()
+}
+
 impl Config {
     /// Build a config from persisted settings, deriving every game-side path from the one root.
     pub fn from_settings(s: crate::settings::Settings) -> Config {
-        let out = "c:/Users/Shadow/Desktop/notes-on-reversing-the-sabetour/output";
+        let out = output_dir();
         Config {
             game_dir: s.game_dir.clone(),
             mesh: format!("{out}/skeletons/sean_full.smsh"),
@@ -130,11 +157,15 @@ fn print_help() {
         "sab_workshop — The Saboteur character/animation viewer (wgpu + egui)\n\n\
          USAGE:\n  sab_workshop [OPTIONS]\n\n\
          OPTIONS:\n\
-         \x20 --mesh  <path>   SMSH skinned mesh   (default: output/skeletons/sean_full.smsh)\n\
-         \x20 --skel  <path>   .skel skeleton      (default: output/skeletons/CH_AL_SeanDevlin.skel)\n\
-         \x20 --index <path>   anim_bone_map.json  (default: output/anim_bone_map.json)\n\
-         \x20 --pack  <path>   Animations.pack     (default: C:/GOG Games/The Saboteur/Animations.pack)\n\
+         \x20 --game  <dir>    game install root   (default: the saved setting, else auto-detected)\n\
+         \x20 --mesh  <path>   SMSH skinned mesh   (default: <output>/skeletons/sean_full.smsh)\n\
+         \x20 --skel  <path>   .skel skeleton      (default: <output>/skeletons/CH_AL_SeanDevlin.skel)\n\
+         \x20 --index <path>   anim_bone_map.json  (default: <output>/anim_bone_map.json)\n\
+         \x20 --pack  <path>   Animations.pack     (default: <game>/Animations.pack)\n\
          \x20 --help           show this help\n\n\
+         PATHS:\n\
+         \x20 <game>   from settings.json, or auto-detected (GOG / Galaxy / Steam / Pandemic layouts)\n\
+         \x20 <output> $SAB_WORKSHOP_OUTPUT, else the nearest output/ above the CWD or the exe\n\n\
          CONTROLS (in the window):\n\
          \x20 LMB drag  orbit    |  MMB drag  pan    |  wheel  zoom\n\
          \x20 left panel: search + click a clip to play; bottom panel: play/pause, loop, speed, scrubber"
