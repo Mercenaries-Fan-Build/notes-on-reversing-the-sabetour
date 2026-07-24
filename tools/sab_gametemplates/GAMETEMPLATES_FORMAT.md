@@ -146,6 +146,44 @@ A modder edits a definition by locating its template (by name) and rewriting the
 
 ---
 
+## Texture / icon references (RE-2 — how a template names a texture)
+
+A pair whose 4-byte `data` is a `pandemic_hash` can reference a **texture**: the value is
+`pandemic_hash(textureName)`, and that is the *same* hash that keys the texture inside its `ALBS`
+bundle directory and (for world materials) the `WSTX` table in `France.materials`. So a template
+parameter → texture resolves straight through:
+
+```
+template pair { property_hash, data=pandemic_hash(textureName) }
+   → ALBS sub-pack directory hash  (== pandemic_hash(textureName))   in Dynamic0/Palettes0.megapack
+   → DTEX record  (plaintext name; name-hash == the value)
+```
+
+**Proven end-to-end.** Foliage template's `Texture` value `0xB52BF31A` == `pandemic_hash("FO_PT_Oak01_AB")`,
+a real DTEX in `Global/Palettes0.megapack` sub-pack #92; `0x26CDA9C7` == `pandemic_hash("Foliage_City_Grass_AB")`
+in the same bundle. Method: score every 4-byte property value against the set of ALBS directory hashes
+(harvested uncompressed from all sub-packs) + the `WSTX` array; texture properties light up.
+
+Reversed texture-carrying properties (from the 10 761-template main DB):
+
+| property hash | name | uses | texture-hash hits | notes |
+|---|---|---|---|---|
+| `0xF011157A` | **`Texture`** | 332 | 182 (Foliage/LightHalo/Decal) | generic texture ref; values in WSTX (world) + Palettes0 (shared) |
+| `0x7172B7AE` | *DecalTexture?* | 39 | 39/39 (WSTX) | only on `type=Decal`; not yet name-reversed |
+| `0x62404569` | *object diffuse?* | 889 | 705 (Dynamic0) | object material pair with ↓; not yet name-reversed |
+| `0xD9725C55` | *object normal?* | 889 | 689 (Dynamic0) | object material pair with ↑; not yet name-reversed |
+| `0xEE7D0BA3` / `0x1DCCDB2F` | *?* | 199 | 129 / 127 (Dynamic0) | second object-texture pair |
+
+Also reversed (non-texture) from the histogram: `Type 0x28E10525`, `LOD 0xA5FBBC36`,
+`Color 0x3FF4F976`, `Face 0x622DD842`, `Head 0x44C27FCB`, `Skin 0x8410E4D6`,
+`Description 0xCE1A4A79`, `Image 0x18D7B670`.
+
+**To wire a custom icon/texture from a template:** pack the DTEX under a name (`sab_dtex`/`sab_poc`),
+then set the relevant texture property's 4-byte value to `pandemic_hash(thatName)` (via
+`sab_gametemplates set-pair … --data <hash LE>`). The engine finds it by that hash. The exact property
+depends on the template `type`; the editor surfaces any hash-valued pair whose value resolves to a
+known texture as a texture reference.
+
 ## Confidence
 
 | claim | status |

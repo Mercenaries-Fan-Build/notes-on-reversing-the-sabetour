@@ -468,7 +468,7 @@ struct Geometry {
     has_normal: bool,
     has_uv: bool,
 }
-struct SmshPrim { index_start: u32, index_count: u32, material: u32, flags: u32 }
+struct SmshPrim { index_start: u32, index_count: u32, material: u32, flags: u32, parent_bone: u16 }
 
 /// Decode all streams from the .dat, resolve per-vertex bone indices to GLOBAL skeleton bones
 /// via the boneRemap palette: global = boneIds[ boneRemaps[localIndex].boneId ].
@@ -576,6 +576,10 @@ fn decode_geometry(tail: &MeshTail, dat: &[u8], remap: Option<&std::collections:
             index_count: prim.num_indices,
             material: d.material,
             flags: d.primitive_index,
+            // Carried through, not dropped: UNSKINNED geometry is bound rigidly to this bone by
+            // the consumer (`formats::bind_rigid_attachments`). The old v1 writer had no field for
+            // it, so the merge step invented a 0 — silently rigging every attachment to the root.
+            parent_bone: d.parent_bone,
         });
     }
     Ok(g)
@@ -584,13 +588,17 @@ fn decode_geometry(tail: &MeshTail, dat: &[u8], remap: Option<&std::collections:
 // ---------------------------------------------------------------------------
 // SMSH writer
 // ---------------------------------------------------------------------------
+/// SMSH v2: header + attributes + indices + prims[20] (…, parent_bone u16, pad u16).
+///
+/// v1 wrote 16-byte prims with no `parent_bone`; the consumer needs it (unskinned geometry is
+/// rigidly bound to that bone), so v2 is what everything downstream reads.
 fn write_smsh(g: &Geometry) -> Vec<u8> {
     let mut o = Vec::new();
     let nv = g.positions.len() as u32;
     let ni = g.indices.len() as u32;
     let np = g.prims.len() as u32;
     o.extend_from_slice(b"SMSH");
-    o.extend_from_slice(&1u32.to_le_bytes());
+    o.extend_from_slice(&2u32.to_le_bytes());
     o.extend_from_slice(&nv.to_le_bytes());
     o.extend_from_slice(&ni.to_le_bytes());
     o.extend_from_slice(&np.to_le_bytes());
@@ -605,8 +613,37 @@ fn write_smsh(g: &Geometry) -> Vec<u8> {
         o.extend_from_slice(&p.index_count.to_le_bytes());
         o.extend_from_slice(&p.material.to_le_bytes());
         o.extend_from_slice(&p.flags.to_le_bytes());
+        o.extend_from_slice(&p.parent_bone.to_le_bytes());
+        o.extend_from_slice(&0u16.to_le_bytes()); // pad
     }
     o
+}
+
+impl Geometry {
+    /// Append another part's geometry, rebasing it onto this one.
+    ///
+    /// Only sound because both parts have already been re-keyed onto ONE skeleton by bone
+    /// name-hash (see `--remap`). Bone INDEX is meaningless across parts — each ships its own
+    /// pruned rig with its own ordering — so merging un-remapped parts silently rigs one part's
+    /// vertices to another part's bones. That is exactly what a bind-pose check cannot see.
+    fn append(&mut self, o: Geometry) {
+        let base_v = self.positions.len() as u32;
+        let base_i = self.indices.len() as u32;
+        self.positions.extend(o.positions);
+        self.normals.extend(o.normals);
+        self.uvs.extend(o.uvs);
+        self.joints.extend(o.joints);
+        self.weights.extend(o.weights);
+        self.indices.extend(o.indices.into_iter().map(|i| i + base_v));
+        self.prims.extend(o.prims.into_iter().map(|mut p| {
+            p.index_start += base_i;
+            p
+        }));
+        self.stream_ranges.extend(o.stream_ranges.into_iter().map(|(s, c)| (s + base_i, c)));
+        self.has_skin |= o.has_skin;
+        self.has_normal &= o.has_normal;
+        self.has_uv &= o.has_uv;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -836,10 +873,25 @@ fn main() {
         eprintln!("[*] remap: joints -> target skeleton ({} bones) from {p}", m.len());
         Some(m)
     } else { None };
+    // Which body parts make up the character, in merge order. The order is part of the contract:
+    // the consumer maps submesh -> body part by cumulative index count.
+    let part_order: Vec<String> = if let Some(i) = args.iter().position(|a| a == "--parts") {
+        let v = args.get(i + 1).cloned().expect("--parts needs a comma list, e.g. HD,UB,LB,GR,HAT");
+        args.drain(i..=i + 1);
+        v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    } else {
+        ["HD", "UB", "LB", "GR", "HAT"].iter().map(|s| s.to_string()).collect()
+    };
+
     if args.len() < 3 {
-        eprintln!("usage: sab_mesh <megapack> [name_substr] <out.smsh> [out.glb]");
-        eprintln!("  default name_substr = \"CH_AL_SeanDevlin_01_GR\"");
-        eprintln!("  e.g. sab_mesh Dynamic0.megapack sean.smsh sean.glb");
+        eprintln!("usage: sab_mesh <megapack> <name_prefix> <out.smsh> [out.glb] [--remap <skel.json>] [--parts HD,UB,...]");
+        eprintln!("  Assembles a whole character: <name_prefix><part> for each part, merged in order.");
+        eprintln!("  --remap is REQUIRED for >1 part: each part ships its own pruned rig, so their");
+        eprintln!("          bone indices are not interchangeable until re-keyed by name-hash.");
+        eprintln!("  default name_prefix = \"CH_AL_SeanDevlin_01_\", default parts = HD,UB,LB,GR,HAT");
+        eprintln!();
+        eprintln!("  e.g. sab_skeleton Dynamic0.megapack CH_AL_SeanDevlin_01_ sean.json");
+        eprintln!("       sab_mesh      Dynamic0.megapack CH_AL_SeanDevlin_01_ --remap sean.json sean_full.smsh");
         std::process::exit(2);
     }
     // Flexible arg parsing: <megapack> [name] <out.smsh> [out.glb]
@@ -850,14 +902,14 @@ fn main() {
         let smsh_idx = rest.iter().position(|a| a.ends_with(".smsh"));
         match smsh_idx {
             Some(i) => {
-                let name = if i == 0 { "CH_AL_SeanDevlin_01_GR".to_string() } else { rest[0].clone() };
+                let name = if i == 0 { "CH_AL_SeanDevlin_01_".to_string() } else { rest[0].clone() };
                 let smsh = rest[i].clone();
                 let glb = rest.get(i + 1).cloned();
                 (name, smsh, glb)
             }
             None => {
                 // no .smsh extension given: treat arg2 as smsh path, optional name absent
-                ("CH_AL_SeanDevlin_01_GR".to_string(), rest[0].clone(), rest.get(1).cloned())
+                ("CH_AL_SeanDevlin_01_".to_string(), rest[0].clone(), rest.get(1).cloned())
             }
         }
     };
@@ -871,15 +923,67 @@ fn main() {
     eprintln!("[*] scanning MSHA meshes matching \"{name_filter}\" ...");
     let hits = scan_meshes(&buf, &name_filter);
     if hits.is_empty() { eprintln!("no MSHA mesh matched \"{name_filter}\""); std::process::exit(1); }
-    let chosen = hits.iter().max_by_key(|h| h.num_bones0).unwrap();
-    eprintln!("[*] chosen: {} (numBones0={}) @ file offset {}", chosen.name, chosen.num_bones0, chosen.file_off);
-    eprintln!("[*] MESH body {}->{} B, .dat {}->{} B", chosen.comp0, chosen.unc0, chosen.comp1, chosen.unc1);
-    if chosen.dat.is_empty() { eprintln!("!! companion .dat (VB/IB) is empty — cannot extract geometry"); std::process::exit(1); }
+    // ---- assemble the character ----
+    //
+    // A character is several MESH parts (_HD/_UB/_LB/_GR/_HAT/…) and the megapack stores each more
+    // than once, so keep ONE hit per part name — the richest — and merge them all. A filter that
+    // names a single part still works; it just merges a set of one.
+    //
+    // Merging is only sound with `--remap`: each part carries its OWN pruned rig with its own bone
+    // ordering (for Sean, 175 of 191 indices name a different bone in a different part), so the
+    // parts must first be re-keyed onto one skeleton by bone name-hash. Without it, one part's
+    // vertices end up rigged to another part's bones — invisible at bind pose, catastrophic the
+    // moment a clip plays. This used to be a separate `merge_smsh.py` step that assumed, in a
+    // docstring, that the parts already shared a skeleton. They do not.
+    // WHICH parts, and in WHAT order, are inputs — not something to infer. A character also ships
+    // ALTERNATES that must not be stacked on top of the body (Sean has _FM and _FX, both the same
+    // 6,686-tri head as _HD, plus a second glove _GR_2); merging everything that matches the filter
+    // would fuse three heads together. And the ORDER is load-bearing: the consumer seeds each
+    // submesh's texture by body part from cumulative index counts in exactly this order
+    // (see sab_workshop `resolve::SEAN_PARTS`), so it must be honoured, not sorted.
+    let parts: Vec<&MeshHit> = part_order
+        .iter()
+        .filter_map(|suffix| {
+            let want = format!("{name_filter}{suffix}");
+            let hit = hits
+                .iter()
+                .filter(|h| h.name.eq_ignore_ascii_case(&want) && !h.dat.is_empty())
+                .max_by_key(|h| h.num_bones0); // the megapack stores each part more than once
+            if hit.is_none() {
+                eprintln!("[*] part {want}: not found (skipped)");
+            }
+            hit
+        })
+        .collect();
+    if parts.is_empty() {
+        eprintln!("!! no part matched \"{name_filter}\" + [{}] with a companion .dat (VB/IB)", part_order.join(","));
+        std::process::exit(1);
+    }
+    if parts.len() > 1 && remap_map.is_none() {
+        eprintln!("!! {} parts matched but no --remap given: their bone indices are NOT interchangeable.", parts.len());
+        eprintln!("   Pass --remap <skel.json> (from sab_skeleton) so every part is re-keyed by bone name-hash.");
+        std::process::exit(1);
+    }
 
-    let (tail, end_p) = parse_mesh(&chosen.body).unwrap_or_else(|e| { eprintln!("mesh parse failed: {e}"); std::process::exit(1); });
-    eprintln!("[*] tail parse cursor ended at {} of {} body bytes ({} leftover)", end_p, chosen.body.len(), chosen.body.len() as i64 - end_p as i64);
+    // The richest part's skeleton is the reference the validation/GLB below report against.
+    let chosen = *parts.iter().max_by_key(|h| h.num_bones0).unwrap();
+    eprintln!("[*] assembling {} part(s); skeleton reference: {} (numBones0={})",
+        parts.len(), chosen.name, chosen.num_bones0);
 
-    let g = decode_geometry(&tail, &chosen.dat, remap_map.as_ref()).unwrap_or_else(|e| { eprintln!("geometry decode failed: {e}"); std::process::exit(1); });
+    let mut g: Option<Geometry> = None;
+    let mut tail_of_chosen = None;
+    for h in &parts {
+        let (tail, _end_p) = parse_mesh(&h.body).unwrap_or_else(|e| { eprintln!("{}: mesh parse failed: {e}", h.name); std::process::exit(1); });
+        let part = decode_geometry(&tail, &h.dat, remap_map.as_ref()).unwrap_or_else(|e| { eprintln!("{}: geometry decode failed: {e}", h.name); std::process::exit(1); });
+        eprintln!("  + {:34} {:6} verts, {:6} tris", h.name, part.positions.len(), part.indices.len() / 3);
+        match &mut g {
+            None => g = Some(part),
+            Some(acc) => acc.append(part),
+        }
+        if h.name == chosen.name { tail_of_chosen = Some(tail); }
+    }
+    let g = g.unwrap();
+    let tail = tail_of_chosen.unwrap();
 
     // ---------------- VALIDATION ----------------
     let nb = tail.skel.num_bones;

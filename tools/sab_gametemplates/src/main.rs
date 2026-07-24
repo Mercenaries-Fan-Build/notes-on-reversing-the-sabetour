@@ -218,14 +218,26 @@ fn write(gt: &GameTemplates) -> Vec<u8> {
 
 // ---- pretty helpers ----
 fn known_hashes() -> HashMap<u32, &'static str> {
-    // small dictionary of property/value name hashes we've resolved so far.
+    // Property/value name hashes resolved so far (pandemic_hash of the ASCII name).
+    // The texture-referencing properties below were reversed in RE-2: their 4-byte data is
+    // `pandemic_hash(textureName)` — the same hash that keys the ALBS bundle directory and the
+    // WSTX material table, so a value resolves straight to a DTEX record. See GAMETEMPLATES_FORMAT.md.
     let names = [
         "Name", "Model", "Priority", "Offset", "AIAttractionPt", "none",
+        // reversed from the main DB property-hash histogram:
+        "Type", "LOD", "Color", "Face", "Head", "Skin", "Description", "Image",
+        // ★ texture references (value = pandemic_hash(textureName)):
+        "Texture",
     ];
     let mut m = HashMap::new();
     for n in names {
         m.insert(pandemic_hash(n), n);
     }
+    // Texture-valued properties not yet name-reversed but PROVEN to carry texture hashes
+    // (value ∈ ALBS dir-hash set). Labelled so `dump` flags them as texture refs.
+    m.insert(0x7172b7ae, "DecalTexture?"); // type=Decal, 39/39 values are WSTX texture hashes
+    m.insert(0x62404569, "ObjTexture0?"); // 705/889 values in Dynamic0 dir-hashes (object diffuse?)
+    m.insert(0xd9725c55, "ObjTexture1?"); // 689/889 values in Dynamic0 dir-hashes (object normal?)
     m
 }
 

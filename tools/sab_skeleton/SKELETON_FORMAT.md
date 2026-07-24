@@ -73,6 +73,18 @@ Arrays follow, in order (let `N = numBones`), starting @288:
 **Bone** (64 bytes): `u32 boneName0` @0; 4×u32=0 @4; `u32 boneName1` @20; u32=0 @24; `u32 unk0` @28;
 BBOX (2×`Vector4`) @32.
 
+> **Fully pinned for *writing* (verified on all 168 bones of `CH_AL_SeanDevlin_01_HD`, 2026-07-17):**
+> - `boneName1` @20 **== `boneName0`** (168/168 identical) — the hash stored twice, not a second name.
+> - `unk0` @28 **== 0** (constant across every bone).
+> - BBOX @32 is `min:Vector4` then `max:Vector4`. Every non-root bone uses the **empty sentinel**
+>   `min=(0,0,0,0)`, `max=(-10000,-10000,-10000,-10000)`; only the root (`GlobalSRT`) carries a real box.
+> - `boneIds` @288 is plain **identity `0..N-1`** for a whole-skeleton mesh.
+>
+> Consequence: a record synthesized as `{hash, 16×0, hash, 0, 0, empty-sentinel}` reproduces the real
+> bytes for **167/168** bones (root differs only in its BBOX). So the **entire skeleton section is
+> authorable from a `.skel`** (names→hashes, RTS→`transforms`+`localTMS`, parents→`parentIds`) with **no
+> donor MESH needed** — the basis for the Mattias-port MESH encoder (`docs/mattias_port_plan.md` Stage 2b).
+
 After the skeleton come `BoneRemaps[numBoneRemaps]` (each `{ 4×4 f32 ibm; u32 boneId }`), `Streams`,
 `Primitives`, `DrawCalls` — not needed for the skeleton.
 

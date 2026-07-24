@@ -166,6 +166,10 @@ struct Bone {
     local_s: [f32; 3],
     world: Mat4,       // bind: parent_world * local
     inv_bind: Mat4,    // inverse(world)
+    /// The asset's OWN inverse-bind for this bone, when the mesh skins it (from BoneRemaps).
+    /// Ground truth: `stored_ibm.inverse()` is the bone's real bind world. `None` for a bone with
+    /// no skin on it, which is also a bone whose position cannot affect the render.
+    stored_ibm: Option<Mat4>,
 }
 
 struct MeshHit {
@@ -243,7 +247,15 @@ fn scan_meshes(buf: &[u8], name_filter: &str) -> Vec<MeshHit> {
 }
 
 /// Parse the flat MESH skeleton from a decompressed body. Returns the bone list.
-fn parse_skeleton(body: &[u8]) -> Result<Vec<Bone>, String> {
+/// Parse one part's skeleton.
+///
+/// `truth` is the character's ground-truth bind WORLD per bone name-hash, gathered from every
+/// part's BoneRemaps (see `gather_truth`). When supplied, it OVERRIDES the derived chain — see
+/// the correction pass below for why that is not optional.
+fn parse_skeleton(
+    body: &[u8],
+    truth: Option<&std::collections::HashMap<u32, Mat4>>,
+) -> Result<Vec<Bone>, String> {
     // ---- MESH header (244 bytes) ----
     // 19*u32 null | BBOX_(Vector min 12 + Vector4 max 16 = 28) | 11*u32 null | name u32 |
     // 8*u32 null | unk0 u32 | 4*u32 null | numBones0 u32@204 | numBoneRemaps u32@208 |
@@ -307,7 +319,36 @@ fn parse_skeleton(body: &[u8]) -> Result<Vec<Bone>, String> {
     // ---- numBones * null32, then optional null16 ----
     p += 4 * num_bones;
     if num_unk_bones1 != 0 { p += 2; }
-    let _ = p; // remaining bytes are BoneRemaps/Streams/Primitives/DrawCalls (not needed)
+
+    // ---- BoneRemaps: the asset's OWN inverse-bind per SKINNED bone ----
+    //
+    // These used to be skipped as "not needed", which was the single most expensive assumption in
+    // this tool. `world[i] = world[parent] · localTMS[i]` silently disagrees with them — the on-disk
+    // local translations for a character's face bones are all (0,0,0), so the chain collapses that
+    // whole subtree onto one point. The chain cannot be repaired from the data it reads; the ibm is
+    // the only place the truth exists. Read it.
+    //
+    // Layout (mirrors sab_mesh): u32 unk0(==numBoneRemaps) + null32, then [ ibm(64) + boneId(4) ].
+    let num_bone_remaps = u32(body, 208) as usize;
+    let mut stored_ibm: Vec<(usize, Mat4)> = Vec::new();
+    if num_bone_remaps > 0 {
+        let guard = u32(body, p) as usize;
+        if guard != num_bone_remaps {
+            return Err(format!("boneRemap count guard mismatch: {guard} != {num_bone_remaps}"));
+        }
+        p += 8;
+        for _ in 0..num_bone_remaps {
+            if p + 68 > body.len() { return Err("truncated BoneRemap array".into()); }
+            let mut raw = [0.0f32; 16];
+            for k in 0..16 { raw[k] = f32a(body, p + k * 4); }
+            let bone_id = u32(body, p + 64) as usize;
+            if bone_id < num_bones {
+                stored_ibm.push((bone_id, Mat4::from_raw_transposed(&raw)));
+            }
+            p += 68;
+        }
+    }
+    let _ = p; // the rest is Streams/Primitives/DrawCalls (not needed here)
 
     // ---- compose world (bind) matrices: world[i] = world[parent] * local[i] ----
     let mut world = vec![Mat4::identity(); num_bones];
@@ -329,20 +370,90 @@ fn parse_skeleton(body: &[u8]) -> Result<Vec<Bone>, String> {
         return Err("bone hierarchy has a cycle or dangling parent".into());
     }
 
+    let ibm_of: std::collections::HashMap<usize, Mat4> = stored_ibm.into_iter().collect();
+
+    // ---- correction pass: the asset's own inverse-binds OVERRIDE the derived chain ----
+    //
+    // `world[i] = world[parent] · localTMS[i]` is not reliable. A character's head part has face
+    // bones whose on-disk local translations are all (0,0,0), so the chain collapses that whole
+    // subtree onto one point — for Sean, 35 of the head's 40 skinned bones land up to 1.7 m from
+    // where they belong, dragging ~1,900 head verts with them.
+    //
+    // This is invisible at bind pose and ONLY at bind pose: `inv_bind` used to be derived from the
+    // same wrong chain, so `jointMatrix = world · inv_bind` came out exactly identity and the mesh
+    // rendered perfectly. It fell apart the moment a clip played. (A "world*invBind ~= I" check
+    // cannot catch this — it is guaranteed to pass for ANY self-consistent chain, right or wrong.)
+    //
+    // The truth is in the data: every skinned bone ships its own inverse-bind in the BoneRemaps,
+    // and those agree with each other across parts. So take the world from `truth` wherever a part
+    // skins the bone, chain only to fill gaps, then DERIVE the locals back out of the corrected
+    // worlds — the locals must match the game's, or an animated local (which is authored against
+    // the game's frames) would be applied in the wrong space.
+    let mut corrected = world.clone();
+    if let Some(truth) = truth {
+        // Parents resolve before children (the file is a forward tree; `world` above already
+        // relied on that), so one ordered pass suffices.
+        let mut order: Vec<usize> = (0..num_bones).collect();
+        order.sort_by_key(|i| {
+            let (mut d, mut p) = (0u32, parents[*i]);
+            while p >= 0 && d < num_bones as u32 {
+                d += 1;
+                p = parents[p as usize];
+            }
+            d
+        });
+        for i in order {
+            corrected[i] = match truth.get(&name_hashes[i]) {
+                Some(tw) => *tw,
+                None if parents[i] < 0 => local_mats[i],
+                None => corrected[parents[i] as usize].mul(&local_mats[i]),
+            };
+        }
+    }
+
     let mut bones = Vec::with_capacity(num_bones);
     for i in 0..num_bones {
-        let (t, r, s) = trs[i];
+        // Locals derived from the CORRECTED worlds, so the hierarchy reproduces the real bind.
+        let local = match parents[i] {
+            p if p < 0 => corrected[i],
+            p => corrected[p as usize].inverse().mul(&corrected[i]),
+        };
+        let (t, r, s) = if truth.is_some() { local.decompose() } else { trs[i] };
         bones.push(Bone {
             index: i,
             name_hash: name_hashes[i],
             parent: parents[i],
             local_t: t, local_r: r, local_s: s,
-            world: world[i],
-            inv_bind: world[i].inverse(),
+            world: corrected[i],
+            inv_bind: corrected[i].inverse(),
+            stored_ibm: ibm_of.get(&i).copied(),
         });
     }
     Ok(bones)
 }
+
+/// Gather the character's ground-truth bind world per bone name-hash, from EVERY part.
+///
+/// Bone INDEX is meaningless across parts — each part carries its own pruned rig with its own
+/// ordering — but the name-hash is stable, and is the same key the animation system uses. A bone
+/// only ships an inverse-bind in the parts that actually skin it, so the union across parts is what
+/// covers the character: the head's ibms are the only witness to where the face is, the glove's are
+/// the only witness to the fingers.
+///
+/// Parts agree where they overlap (verified with `sab_probe parts`), so first writer wins.
+fn gather_truth(hits: &[MeshHit]) -> std::collections::HashMap<u32, Mat4> {
+    let mut truth = std::collections::HashMap::new();
+    for h in hits {
+        let Ok(bones) = parse_skeleton(&h.body, None) else { continue };
+        for b in &bones {
+            if let Some(ibm) = b.stored_ibm {
+                truth.entry(b.name_hash).or_insert_with(|| ibm.inverse());
+            }
+        }
+    }
+    truth
+}
+
 
 // ---------------------------------------------------------------------------
 // Minimal built-in bone-name dictionary (pandemic_hash -> name) for a readable report.
@@ -361,6 +472,12 @@ fn known_bone_names() -> Vec<&'static str> {
         "bone_attach_lhand", "bone_attach_rhand",
         "bone_cheek_left", "bone_cheek_right", "bone_jaw", "bone_tongue",
         "bone_eye_left", "bone_eye_right", "bone_eyelid_left", "bone_eyelid_right",
+        // Recovered by hashing candidates against the rig (`sab_probe names`) rather than guessed.
+        // The clavicles above are a MISS — the rig calls them shoulders, so `Bone_LClav`/`Bone_RClav`
+        // have never resolved to anything. Kept only in case another character uses them.
+        "bone_lshoulder", "bone_rshoulder",
+        "bone_chin", "bone_nostrilL", "bone_nostrilR", "bone_cheekL", "bone_cheekR",
+        "bone_eyeL", "bone_eyeR", "bone_brow_left", "bone_brow_right",
     ];
     // finger/thumb variants
     for side in ["L", "R"] {
@@ -392,6 +509,37 @@ fn arr4(a: [f32; 4]) -> String { format!("[{},{},{},{}]", f(a[0]), f(a[1]), f(a[
 fn arr16(a: [f32; 16]) -> String {
     let parts: Vec<String> = a.iter().map(|&x| f(x)).collect();
     format!("[{}]", parts.join(","))
+}
+
+/// Emit the flat `.skel` text the rig consumers read (sab_workshop `formats::read_skel`):
+///
+/// ```text
+/// # parent name  tx ty tz  rx ry rz rw  sx sy sz  [invbind m0..m15 (row-major)]
+/// ```
+///
+/// One bone per line, parents before children. Bones the name dictionary knows get their real
+/// name; the rest are `bone_<index>_0x<hash>` so the pandemic_hash — the identity the animation
+/// system keys on — survives in the file even when the string doesn't.
+///
+/// This used to be produced outside the repo, which is precisely why a corrected bind had nowhere
+/// to go. It is emitted here now: same tool, same pass, same numbers.
+fn emit_skel(bones: &[Bone]) -> String {
+    let names = build_name_map();
+    let mut s = String::new();
+    s.push_str("# parent name  tx ty tz  rx ry rz rw  sx sy sz  [invbind m0..m15 (row-major)]\n");
+    for b in bones {
+        let name = names
+            .get(&b.name_hash)
+            .map(|n| (*n).to_string())
+            .unwrap_or_else(|| format!("bone_{}_0x{:08X}", b.index, b.name_hash));
+        s.push_str(&format!("{} {}", b.parent, name));
+        for v in b.local_t { s.push(' '); s.push_str(&f(v)); }
+        for v in b.local_r { s.push(' '); s.push_str(&f(v)); }
+        for v in b.local_s { s.push(' '); s.push_str(&f(v)); }
+        for v in b.inv_bind.flat_rowmajor() { s.push(' '); s.push_str(&f(v)); }
+        s.push('\n');
+    }
+    s
 }
 
 fn emit_json(
@@ -514,9 +662,23 @@ fn main() {
     eprintln!("[*] chosen: {} (numBones0={}) @ file offset {}",
         chosen.name, chosen.num_bones0, chosen.file_off);
 
-    let bones = parse_skeleton(&chosen.body).unwrap_or_else(|e| {
+    // The canonical rig is the richest part's, but that part is whichever has the MOST bones — for
+    // Sean the glove, which skins only 12 of its 191. It therefore witnesses almost none of its own
+    // skeleton. Every part's BoneRemaps are pooled first so the bind can be corrected against bones
+    // this part never skins (above all the face, which only the head part sees).
+    let truth = gather_truth(&hits);
+    eprintln!("[*] ground truth: {} bone(s) with a stored inverse-bind across {} part(s)",
+        truth.len(), hits.len());
+
+    let bones = parse_skeleton(&chosen.body, Some(&truth)).unwrap_or_else(|e| {
         eprintln!("skeleton parse failed: {e}"); std::process::exit(1);
     });
+    let corrected = bones
+        .iter()
+        .filter(|b| truth.contains_key(&b.name_hash))
+        .count();
+    eprintln!("[*] bind pose: {corrected}/{} bone(s) taken from the asset's own inverse-bind, \
+        {} chained (no part skins them)", bones.len(), bones.len() - corrected);
 
     // ---- validation ----
     let root_count = bones.iter().filter(|b| b.parent < 0).count();
@@ -554,7 +716,13 @@ fn main() {
         eprintln!("containing megapack entry: index=0x{:08X} crc=0x{:08X} offset={} size={}", index, crc, off, size);
     }
 
-    let json = emit_json(path, chosen, entry, &bones, root_count);
-    std::fs::write(&out_path, &json).unwrap_or_else(|e| { eprintln!("write error: {e}"); std::process::exit(1); });
-    eprintln!("\n[*] wrote {out_path} ({} bones, {} bytes)", bones.len(), json.len());
+    // `.skel` is the flat text the rig consumers read; anything else gets the JSON report (which
+    // sab_mesh --remap also uses as its name-hash -> index map).
+    let text = if out_path.ends_with(".skel") {
+        emit_skel(&bones)
+    } else {
+        emit_json(path, chosen, entry, &bones, root_count)
+    };
+    std::fs::write(&out_path, &text).unwrap_or_else(|e| { eprintln!("write error: {e}"); std::process::exit(1); });
+    eprintln!("\n[*] wrote {out_path} ({} bones, {} bytes)", bones.len(), text.len());
 }
